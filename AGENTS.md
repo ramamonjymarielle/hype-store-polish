@@ -8,3 +8,5 @@
 > Commits you push to the connected branch sync back to Lovable and show up in
 > the editor, so keep the branch in a working state.
 <!-- LOVABLE:END -->
+
+- The HYPE storefront lives in src/hype/ (imported single-file app, client-only via lazy+ClientOnly at /) because it relies on window/localStorage at init.

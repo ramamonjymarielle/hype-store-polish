@@ -137,8 +137,117 @@
     border-color: var(--color-border);
   }
 
-  body {
-    background-color: var(--color-background);
-    color: var(--color-foreground);
+}
+
+
+:root {
+  --bg: #D9D9D9;
+  --fg: #0A0A0A;
+  --card: #F2F2F2;
+  --mut: #5c5c5c;
+  --ln: #b5b5b5;
+  --red: #A11212;
+  box-sizing: border-box;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101010;
+    --fg: #F2F2F2;
+    --card: #1c1c1c;
+    --mut: #a0a0a0;
+    --ln: #343434;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #101010;
+  --fg: #F2F2F2;
+  --card: #1c1c1c;
+  --mut: #a0a0a0;
+  --ln: #343434;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: calc(64px + env(safe-area-inset-top, 0px));
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 300 14px/1.55 Montserrat, system-ui, sans-serif;
+  overflow-x: hidden;
+}
+
+@media (min-width: 640px) {
+  body {
+    font-size: 15px;
+  }
+}
+
+h1, h2, h3, h4, .font-anton {
+  font-family: Anton, Impact, 'Arial Narrow', sans-serif;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+}
+
+button, input, textarea, select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  background: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: 2px;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+/* Hide scrollbar for clean horizontal swiping on mobile */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Tabular figures for numbers and prices */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Coins très légèrement arrondis sur tous les rectangles */
+@layer base {
+  button, input, select, textarea, details, a.inline-flex { border-radius: 6px; }
+}
+
+/* Taille sélectionnée : entourée d'un cercle rouge */
+.size-selected-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 1.6rem; height: 1.6rem; padding: 0 .3rem;
+  border-radius: 9999px; background: var(--red); color: #fff;
 }
