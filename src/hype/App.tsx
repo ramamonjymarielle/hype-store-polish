@@ -961,7 +961,7 @@ export function App() {
     return {
       v: coPayMode,
       t,
-      paid: coPayMode === '50' ? Math.round(t / 2) : t,
+      paid: coPayMode === '50' ? Math.round(cartSubtotal / 2) : cartSubtotal,
     };
   };
 
@@ -1047,7 +1047,7 @@ export function App() {
     const pr = lines.map(
       (l) => `${l.q} × ${l.name} – ${l.color}${l.size ? ' – ' + l.size : ''} – ${formatAr(l.price * l.q)}`
     );
-    const whatsappMsg = `Bonjour HYPE ! Commande ${no} – ${coName.trim()} – total ${formatAr(newOrder.total)} – payé ${formatAr(newOrder.paid)} – réf. Mvola ${newOrder.mvola_ref}`;
+    const whatsappMsg = `Bonjour HYPE ! Commande ${no} – ${coName.trim()} – total ${formatAr(newOrder.total)} – payé ${formatAr(newOrder.paid)} – réf. Mvola ${newOrder.mvola_ref} – frais de livraison ${formatAr(LIV)} à payer au livreur`;
 
     try {
       if (window.emailjs) {
@@ -1626,7 +1626,7 @@ export function App() {
             <details className="p-3 sm:p-4 bg-[var(--card)] border border-[var(--ln)] rounded-md">
               <summary className="font-semibold cursor-pointer">Paiement</summary>
               <p className="mt-2 text-[var(--mut)]">
-                Mvola uniquement : soit 50 % d&apos;acompte avec le solde payé à la livraison, soit le paiement total à l&apos;avance. Le numéro s&apos;affiche à l&apos;étape de commande.
+                Mvola uniquement : soit 50 % d&apos;acompte sur les articles avec le solde payé à la livraison, soit le paiement total des articles à l&apos;avance. Les frais de livraison se payent au livreur le jour J. Le numéro s&apos;affiche à l&apos;étape de commande.
               </p>
             </details>
             <details className="p-3 sm:p-4 bg-[var(--card)] border border-[var(--ln)] rounded-md">
@@ -2170,6 +2170,12 @@ export function App() {
                     <div className="p-3 bg-[var(--fg)] text-[var(--bg)] text-xs rounded-md">
                       Envoie <b>{formatAr(getPaymentSummary()?.paid || 0)}</b> par Mvola au{' '}
                       <b>038 12 219 50</b> (Ramamonjy Marielle), puis saisis la référence.
+                      <div className="mt-1.5 opacity-90">
+                        Les frais de livraison s&apos;élèvent à <b>{formatAr(LIV)}</b>, à payer au livreur le jour de la livraison.
+                        {coPayMode === '50' && (
+                          <> Solde articles à régler à la livraison : <b>{formatAr(cartSubtotal - Math.round(cartSubtotal / 2))}</b>.</>
+                        )}
+                      </div>
                     </div>
                   )}
 
