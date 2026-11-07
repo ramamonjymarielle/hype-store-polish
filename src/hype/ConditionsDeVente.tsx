@@ -22,7 +22,7 @@ const ITEMS = [
   {
     n: '05',
     t: 'Acompte obligatoire',
-    d: 'Votre commande n’est confirmée qu’après paiement par Mvola : soit un acompte de 50 % avec le reste à payer à la livraison, soit le paiement complet à l’avance.',
+    d: 'Votre commande n’est confirmée qu’après paiement par Mvola : soit un acompte de 50 % du prix des articles avec le reste à payer à la livraison, soit le paiement complet des articles à l’avance. Les frais de livraison sont à payer directement au livreur le jour de la livraison.',
   },
   {
     n: '06',
