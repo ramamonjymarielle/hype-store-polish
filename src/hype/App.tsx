@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { HYPE_LOGO } from './logo';
 import { processStudioImage, type StudioOptions } from './imageStudio';
 import { ConditionsDeVente } from './ConditionsDeVente';
+import { supabase } from '@/integrations/supabase/client';
 
 declare global {
   interface Window {
@@ -410,12 +411,84 @@ const compressImageFile = (file: File): Promise<string> =>
 
 export function App() {
   // Products and persistence
-  const [rawProducts, setRawProducts] = useState<RawProduct[]>(() =>
-    loadLocal('hype_products_db_v3', INITIAL_PRODUCTS)
+  const [rawProducts, setRawProductsState] = useState<RawProduct[]>(() =>
+    loadLocal('hype_products_cache_v4', INITIAL_PRODUCTS)
   );
-  const [orders, setOrders] = useState<Order[]>(() =>
-    loadLocal('hype_orders_db_v3', INITIAL_ORDERS)
-  );
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+
+  const fetchProducts = async () => {
+    const { data, error } = await supabase.from('products').select('data, sort').order('sort');
+    if (!error && data) {
+      const list = data.map((r: any) => r.data as RawProduct);
+      setRawProductsState(list);
+      saveLocal('hype_products_cache_v4', list);
+    }
+  };
+
+  // Admin edits: update local state then sync the changed rows to the shared database
+  const setRawProducts = (updater: (prev: RawProduct[]) => RawProduct[]) => {
+    setRawProductsState((prev) => {
+      const next = updater(prev);
+      const removed = prev.filter((p) => !next.some((n) => n.id === p.id)).map((p) => p.id);
+      const changed = next
+        .map((p, i) => ({ p, i }))
+        .filter(({ p }) => {
+          const old = prev.find((o) => o.id === p.id);
+          return !old || JSON.stringify(old) !== JSON.stringify(p);
+        });
+      (async () => {
+        if (removed.length) await supabase.from('products').delete().in('id', removed);
+        if (changed.length) {
+          const { error } = await supabase
+            .from('products')
+            .upsert(changed.map(({ p, i }) => ({ id: p.id, data: p, sort: i, updated_at: new Date().toISOString() })));
+          if (error) alert("Erreur d'enregistrement du catalogue : " + error.message);
+        }
+      })();
+      return next;
+    });
+  };
+
+  const fetchOrders = async () => {
+    const { data, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false });
+    if (!error && data) setOrders(data as any);
+  };
+
+  useEffect(() => {
+    fetchProducts();
+    const checkAdmin = async (session: any) => {
+      if (!session?.user) {
+        setIsAdmin(false);
+        return;
+      }
+      const { data } = await supabase.rpc('has_role', { _user_id: session.user.id, _role: 'admin' });
+      setIsAdmin(!!data);
+      if (data) {
+        setAdmMode('dashboard');
+        fetchOrders();
+      }
+    };
+    supabase.auth.getSession().then(({ data }) => checkAdmin(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') checkAdmin(session);
+    });
+    const channel = supabase
+      .channel('hype-products-' + Math.random().toString(36).slice(2))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchProducts())
+      .subscribe();
+    return () => {
+      sub.subscription.unsubscribe();
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Refresh orders regularly while the admin dashboard is open
+  useEffect(() => {
+    if (!isAdmin) return;
+    const t = setInterval(fetchOrders, 30000);
+    return () => clearInterval(t);
+  }, [isAdmin]);
   const [securityLogs, setSecurityLogs] = useState<SecurityLog[]>(() =>
     loadLocal('hype_sec_logs_v3', [
       {
@@ -428,26 +501,9 @@ export function App() {
       },
     ])
   );
-  const [adminPassword, setAdminPassword] = useState<string>(() =>
-    loadLocal('hype_adm_pass_v3', 'HypeAdmin2026!')
-  );
-
-  // Sync to local storage
-  useEffect(() => {
-    saveLocal('hype_products_db_v3', rawProducts);
-  }, [rawProducts]);
-
-  useEffect(() => {
-    saveLocal('hype_orders_db_v3', orders);
-  }, [orders]);
-
   useEffect(() => {
     saveLocal('hype_sec_logs_v3', securityLogs);
   }, [securityLogs]);
-
-  useEffect(() => {
-    saveLocal('hype_adm_pass_v3', adminPassword);
-  }, [adminPassword]);
 
   // Catalog state
   const [cart, setCart] = useState<CartItem[]>(() => loadLocal('h_cart_fresh_1', []));
