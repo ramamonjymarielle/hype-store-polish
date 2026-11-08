@@ -7,7 +7,7 @@
  */
 
 export interface StudioOptions {
-  mode: 'white' | 'dark' | 'transparent' | 'original';
+  mode: 'white' | 'dark' | 'transparent' | 'original' | 'cover' | 'blur';
   removeBg: boolean;
   targetSize?: number;
 }
@@ -39,6 +39,26 @@ export async function processStudioImage(
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
           if (!ctx) {
             resolve(e.target?.result as string);
+            return;
+          }
+
+          // Cover fills the square without distortion; blur keeps the full photograph.
+          if (options.mode === 'cover' || options.mode === 'blur' || options.mode === 'original') {
+            const scale = Math.max(targetSize / img.width, targetSize / img.height);
+            const width = img.width * scale;
+            const height = img.height * scale;
+            if (options.mode === 'blur') {
+              ctx.save();
+              ctx.filter = `blur(${Math.max(12, targetSize * 0.025)}px)`;
+              const bleed = targetSize * 0.08;
+              ctx.drawImage(img, (targetSize - width) / 2 - bleed, (targetSize - height) / 2 - bleed, width + bleed * 2, height + bleed * 2);
+              ctx.restore();
+              const fit = Math.min(targetSize / img.width, targetSize / img.height);
+              ctx.drawImage(img, (targetSize - img.width * fit) / 2, (targetSize - img.height * fit) / 2, img.width * fit, img.height * fit);
+            } else {
+              ctx.drawImage(img, (targetSize - width) / 2, (targetSize - height) / 2, width, height);
+            }
+            resolve(canvas.toDataURL('image/jpeg', 0.92));
             return;
           }
 

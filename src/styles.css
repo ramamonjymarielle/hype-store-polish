@@ -251,3 +251,29 @@ img {
   min-width: 1.6rem; height: 1.6rem; padding: 0 .3rem;
   border-radius: 9999px; background: var(--red); color: #fff;
 }
+
+:root {
+  --order-surface: oklch(0.98 0 0);
+  --order-ink: oklch(0.18 0 0);
+  --order-pending: oklch(0.43 0.17 27);
+  --order-verified: oklch(0.4 0.1 155);
+  --order-shipping: oklch(0.42 0.14 260);
+  --order-neutral: oklch(0.38 0 0);
+  --order-badge-ink: oklch(1 0 0);
+}
+.order-card {
+  background: var(--order-surface);
+  color: var(--order-ink);
+  border: 1px solid var(--ln);
+  border-left: 5px solid var(--order-neutral);
+}
+.order-pending { border-left-color: var(--order-pending); }
+.order-verified { border-left-color: var(--order-verified); }
+.order-shipping { border-left-color: var(--order-shipping); }
+.order-card .order-badge { color: var(--order-badge-ink); font-weight: 700; }
+.order-badge-pending { background: var(--order-pending); }
+.order-badge-verified { background: var(--order-verified); }
+.order-badge-shipping { background: var(--order-shipping); }
+.order-badge-delivered, .order-badge-cancelled { background: var(--order-neutral); }
+.order-card select { background: var(--order-surface); color: var(--order-ink); max-width: 100%; }
+.order-card .dark\:bg-black\/40 { background: var(--order-surface); }

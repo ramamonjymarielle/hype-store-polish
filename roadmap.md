@@ -7,3 +7,4 @@
 - [ ] Per-color price
 - [ ] Enriched WhatsApp message
 - [ ] Product page WhatsApp question link + "Continuer mes achats"
+- [ ] Enforce 50% deposit on articles only; delivery paid to courier, UI and server tests

@@ -4,6 +4,8 @@ import { HYPE_LOGO } from './logo';
 import { processStudioImage, type StudioOptions } from './imageStudio';
 import { ConditionsDeVente } from './ConditionsDeVente';
 import { supabase } from '@/integrations/supabase/client';
+import { Button } from '@/components/ui/button';
+import { normalizeWhatsapp, deliveryFee, variantPrice, orderMessage, type DeliveryZone } from './commerce';
 
 declare global {
   interface Window {
@@ -23,6 +25,7 @@ export interface ProductColor {
   h: string; // Code couleur hex, ex: "#0A0A0A"
   i: string[]; // URLs ou data-URLs des photos
   st: number | Record<string, number>; // Stock global ou par taille
+  p?: number; // Prix spécifique de cette variante
 }
 
 export interface RawProduct {
@@ -426,28 +429,24 @@ export function App() {
     }
   };
 
-  // Admin edits: update local state then sync the changed rows to the shared database
-  const setRawProducts = (updater: (prev: RawProduct[]) => RawProduct[]) => {
-    setRawProductsState((prev) => {
-      const next = updater(prev);
-      const removed = prev.filter((p) => !next.some((n) => n.id === p.id)).map((p) => p.id);
-      const changed = next
-        .map((p, i) => ({ p, i }))
-        .filter(({ p }) => {
-          const old = prev.find((o) => o.id === p.id);
-          return !old || JSON.stringify(old) !== JSON.stringify(p);
-        });
-      (async () => {
-        if (removed.length) await supabase.from('products').delete().in('id', removed);
-        if (changed.length) {
-          const { error } = await supabase
-            .from('products')
-            .upsert(changed.map(({ p, i }) => ({ id: p.id, data: p, sort: i, updated_at: new Date().toISOString() })));
-          if (error) alert("Erreur d'enregistrement du catalogue : " + error.message);
-        }
-      })();
-      return next;
+  // Persist before displaying success; side effects never run inside a React state updater.
+  const setRawProducts = async (updater: (prev: RawProduct[]) => RawProduct[]) => {
+    if (!isAdmin) throw new Error('Connexion administrateur requise.');
+    const next = updater(structuredClone(rawProducts));
+    const removed = rawProducts.filter(p => !next.some(n => n.id === p.id)).map(p => p.id);
+    const changed = next.map((p, sort) => ({ p, sort })).filter(({ p }) => {
+      const old = rawProducts.find(o => o.id === p.id);
+      return !old || JSON.stringify(old) !== JSON.stringify(p);
     });
+    if (removed.length) {
+      const { error } = await supabase.from('products').delete().in('id', removed);
+      if (error) throw error;
+    }
+    if (changed.length) {
+      const { error } = await supabase.from('products').upsert(changed.map(({ p, sort }) => ({ id: p.id, data: p, sort, updated_at: new Date().toISOString() })));
+      if (error) throw error;
+    }
+    await fetchProducts();
   };
 
   const fetchOrders = async () => {
@@ -460,6 +459,8 @@ export function App() {
     const checkAdmin = async (session: any) => {
       if (!session?.user) {
         setIsAdmin(false);
+        setOrders([]);
+        setAdmMode('login');
         return;
       }
       const { data } = await supabase.rpc('has_role', { _user_id: session.user.id, _role: 'admin' });
@@ -469,9 +470,9 @@ export function App() {
         fetchOrders();
       }
     };
-    supabase.auth.getSession().then(({ data }) => checkAdmin(data.session));
+    supabase.auth.getUser().then(({ data }) => checkAdmin(data.user ? { user: data.user } : null));
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') checkAdmin(session);
+      if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') setTimeout(() => checkAdmin(session), 0);
     });
     const channel = supabase
       .channel('hype-products-' + Math.random().toString(36).slice(2))
@@ -486,8 +487,10 @@ export function App() {
   // Refresh orders regularly while the admin dashboard is open
   useEffect(() => {
     if (!isAdmin) return;
-    const t = setInterval(fetchOrders, 30000);
-    return () => clearInterval(t);
+    fetchOrders();
+    const channel = supabase.channel('hype-orders-' + Math.random().toString(36).slice(2))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, fetchOrders).subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [isAdmin]);
   const [securityLogs, setSecurityLogs] = useState<SecurityLog[]>(() =>
     loadLocal('hype_sec_logs_v3', [
@@ -583,6 +586,8 @@ export function App() {
   // Cart & Checkout Drawer (#d) state
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
   const [drawerView, setDrawerView] = useState<'cart' | 'co' | 'ok'>('cart');
+  const [coZone, setCoZone] = useState<DeliveryZone | ''>('');
+  const shippingFee = deliveryFee(coZone);
   const [coName, setCoName] = useState<string>('');
   const [coWa, setCoWa] = useState<string>('');
   const [coWaConfirm, setCoWaConfirm] = useState<boolean>(false);
@@ -599,7 +604,7 @@ export function App() {
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => window.location.hash === '#admin');
   const [admMode, setAdmMode] = useState<
     'login' | 'verify-code' | 'forgot' | 'dashboard'
-  >(() => (sessionStorage.getItem('hype_adm_token') ? 'dashboard' : 'login'));
+  >('login');
   const [admEmail, setAdmEmail] = useState<string>('ramamonjymarielle@gmail.com');
   const [admPass, setAdmPass] = useState<string>('');
   const [admMsg, setAdmMsg] = useState<string>('');
@@ -621,8 +626,8 @@ export function App() {
   const [customBadgeInput, setCustomBadgeInput] = useState<string>('');
 
   // Studio photo processing state
-  const [studioMode, setStudioMode] = useState<'white' | 'dark' | 'transparent' | 'original'>('white');
-  const [studioRemoveBg, setStudioRemoveBg] = useState<boolean>(true);
+  const [studioMode, setStudioMode] = useState<StudioOptions['mode']>('cover');
+  const [studioRemoveBg, setStudioRemoveBg] = useState<boolean>(false);
   const [studioProcessing, setStudioProcessing] = useState<boolean>(false);
 
   // Password reset fields in security tab
@@ -634,9 +639,7 @@ export function App() {
     const handleHash = () => {
       const onAdmin = window.location.hash === '#admin';
       setIsAdminRoute(onAdmin);
-      if (onAdmin && sessionStorage.getItem('hype_adm_token')) {
-        setAdmMode('dashboard');
-      }
+
     };
     window.addEventListener('hashchange', handleHash);
     return () => window.removeEventListener('hashchange', handleHash);
@@ -666,268 +669,100 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // Send verification code email via EmailJS
-  const sendVerificationEmail = async (
-    targetEmail: string,
-    code: string,
-    sentAt: string
-  ): Promise<boolean> => {
-    try {
-      if (window.emailjs && typeof window.emailjs.send === 'function') {
-        await window.emailjs.send(
-          EJ.s,
-          EJ.t,
-          {
-            to_email: targetEmail,
-            email: targetEmail,
-            nom_client: `SÉCURITÉ ADMIN HYPE (${targetEmail})`,
-            telephone: `CODE : ${code}`,
-            adresse_livraison: `Tentative de connexion le ${sentAt}`,
-            produits: `Code de vérification de sécurité HYPE : <b style="font-size:22px;color:#A11212">${code}</b> (valable 10 minutes).`,
-            mode_paiement: `CODE DE VÉRIFICATION : ${code}`,
-            reference_mvola: code,
-            total: code,
-            montant_paye: 'Valable 10 minutes',
-            solde_livraison: 'Sécurité Admin HYPE',
-            lien_whatsapp: window.location.origin + '/#admin',
-          },
-          { publicKey: EJ.k }
-        );
-        return true;
-      }
-    } catch (err) {
-      console.warn('EmailJS delivery fallback:', err);
+  // Authentication is verified by Cloud; no password or verification code is stored locally.
+  const openAdminSession = async () => {
+    const { data: userData } = await supabase.auth.getUser();
+    if (!userData.user) return false;
+    const { data, error } = await supabase.rpc('has_role', { _user_id: userData.user.id, _role: 'admin' });
+    if (error || !data) {
+      await supabase.auth.signOut();
+      setAdmMsg('Ce compte ne possède pas les droits administrateur.');
+      return false;
     }
-    return false;
+    setIsAdmin(true);
+    setAdmMode('dashboard');
+    setAdmPass('');
+    await fetchOrders();
+    return true;
   };
 
-  // Handle Admin Login submission
+  const sendEmailAccess = async () => {
+    setAdmBusy(true);
+    setAdmMsg('');
+    const { error } = await supabase.auth.signInWithOtp({
+      email: ADMIN_EMAIL,
+      options: { shouldCreateUser: false, emailRedirectTo: window.location.origin + '/#admin' },
+    });
+    if (error) {
+      setAdmMsg('Envoi impossible : ' + error.message + '. Pour un premier accès, créez votre compte administrateur.');
+    } else {
+      setChallenge({ email: ADMIN_EMAIL, expiresAt: Date.now() + 3600000, message: 'Un e-mail de connexion sécurisé vient d’être envoyé. Utilisez le lien reçu ou le code contenu dans cet e-mail.', emailJsSent: true });
+      setAdmMode('verify-code');
+    }
+    setAdmBusy(false);
+  };
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAdmBusy(true);
     setAdmMsg('');
-    setAdmVerifyBanner('');
-
-    const emailTrimmed = admEmail.trim().toLowerCase();
-    if (emailTrimmed !== ADMIN_EMAIL.toLowerCase()) {
+    const { error } = await supabase.auth.signInWithPassword({ email: admEmail.trim(), password: admPass });
+    if (error) {
       setAdmBusy(false);
-      setAdmMsg(`Accès réservé. Utilisez l’e-mail administrateur : ${ADMIN_EMAIL}`);
+      if (admEmail.trim().toLowerCase() === ADMIN_EMAIL) await sendEmailAccess();
+      else setAdmMsg('Identifiants invalides.');
       return;
     }
-
-    // Direct match with valid password
-    if (admPass === adminPassword) {
-      sessionStorage.setItem('hype_adm_token', 'hype-session-' + Date.now());
-      setAdmPass('');
-      setAdmMode('dashboard');
-      setAdmBusy(false);
-      setSecurityLogs((prev) => [
-        {
-          id: Date.now(),
-          timestamp: new Date().toISOString(),
-          email: ADMIN_EMAIL,
-          event: 'password_login',
-          details: 'Connexion directe réussie avec le mot de passe administrateur.',
-          status: 'success',
-        },
-        ...prev,
-      ]);
-      return;
-    }
-
-    // WRONG PASSWORD -> TRIGGER 6-DIGIT EMAIL VERIFICATION CODE CHALLENGE!
-    const code = generate6DigitCode();
-    const challengeId = 'chk_' + Date.now();
-    const now = Date.now();
-    const expiresAt = now + 10 * 60 * 1000;
-    const sentAtFormatted = new Date().toLocaleString('fr-FR');
-
-    const emailSent = await sendVerificationEmail(ADMIN_EMAIL, code, sentAtFormatted);
-
-    setChallenge({
-      challengeId,
-      email: ADMIN_EMAIL,
-      code,
-      expiresAt,
-      message: `Mot de passe incorrect. Pour sécuriser votre accès et valider cette tentative de connexion, un e-mail contenant un code de vérification à 6 chiffres vient d'être envoyé à ${ADMIN_EMAIL}.`,
-      emailJsSent: emailSent,
-      sentAtFormatted,
-    });
-
-    setSecurityLogs((prev) => [
-      {
-        id: Date.now(),
-        timestamp: new Date().toISOString(),
-        email: ADMIN_EMAIL,
-        event: 'wrong_password_code_sent',
-        details: `Mot de passe erroné saisi. Code de vérification envoyé par e-mail à ${ADMIN_EMAIL} pour valider la tentative.`,
-        code,
-        status: 'warning',
-      },
-      ...prev,
-    ]);
-
-    setVerificationCodeInput('');
-    setAdmMsg('');
-    setAdmMode('verify-code');
+    await openAdminSession();
     setAdmBusy(false);
   };
-
-  // Resend 6-digit verification code
-  const handleResendCode = async () => {
-    if (!challenge) return;
+  const handleCreateAdminAccount = async () => {
+    if (admEmail.trim().toLowerCase() !== ADMIN_EMAIL || admPass.length < 8) {
+      setAdmMsg('Utilisez votre adresse administrateur et un nouveau mot de passe d’au moins 8 caractères.');
+      return;
+    }
     setAdmBusy(true);
-    setAdmMsg('');
-    const code = generate6DigitCode();
-    const expiresAt = Date.now() + 10 * 60 * 1000;
-    const sentAtFormatted = new Date().toLocaleString('fr-FR');
-
-    const emailSent = await sendVerificationEmail(challenge.email, code, sentAtFormatted);
-
-    setChallenge({
-      ...challenge,
-      code,
-      expiresAt,
-      emailJsSent: emailSent,
-      sentAtFormatted,
-    });
-
-    setSecurityLogs((prev) => [
-      {
-        id: Date.now(),
-        timestamp: new Date().toISOString(),
-        email: challenge.email,
-        event: 'code_resent',
-        details: `Nouveau code de vérification envoyé par e-mail à ${challenge.email}.`,
-        code,
-        status: 'warning',
-      },
-      ...prev,
-    ]);
-
-    setVerificationCodeInput('');
-    setAdmMsg('Un nouveau code à 6 chiffres vient d’être envoyé par e-mail.');
+    const { error } = await supabase.auth.signUp({ email: ADMIN_EMAIL, password: admPass, options: { emailRedirectTo: window.location.origin + '/#admin' } });
+    setAdmMsg(error ? error.message : 'Vérifiez votre boîte e-mail pour confirmer votre compte, puis connectez-vous.');
     setAdmBusy(false);
   };
-
-  // Validate 6-digit verification code
+  const handleResendCode = sendEmailAccess;
   const handleVerifyCodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!challenge) return;
-    const cleaned = verificationCodeInput.replace(/\s+/g, '');
-
-    if (!/^\d{6}$/.test(cleaned)) {
-      setAdmMsg('Veuillez saisir le code de vérification à 6 chiffres.');
-      return;
-    }
-
-    if (Date.now() > challenge.expiresAt) {
-      setAdmMsg('Ce code a expiré (10 minutes dépassées). Cliquez sur « Renvoyer un code ».');
-      return;
-    }
-
-    if (cleaned !== challenge.code) {
-      setAdmMsg('Code de vérification incorrect. Veuillez vérifier vos e-mails ou renvoyer un code.');
-      setSecurityLogs((prev) => [
-        {
-          id: Date.now(),
-          timestamp: new Date().toISOString(),
-          email: challenge.email,
-          event: 'code_failed',
-          details: `Code saisi invalide (${cleaned}).`,
-          status: 'danger',
-        },
-        ...prev,
-      ]);
-      return;
-    }
-
-    // Success!
-    if (wantUpdatePassAfterCode && newPassAfterCode.length >= 8) {
-      setAdminPassword(newPassAfterCode);
-    }
-
-    sessionStorage.setItem('hype_adm_token', 'hype-session-' + Date.now());
-    setAdmPass('');
-    setVerificationCodeInput('');
-    setChallenge(null);
-    setAdmVerifyBanner('Tentative de connexion validée avec succès par code e-mail.');
-    setAdmMode('dashboard');
-
-    setSecurityLogs((prev) => [
-      {
-        id: Date.now(),
-        timestamp: new Date().toISOString(),
-        email: challenge.email,
-        event: 'code_verified',
-        details: `Connexion validée avec succès grâce au code de sécurité e-mail.`,
-        status: 'success',
-      },
-      ...prev,
-    ]);
-  };
-
-  const handleAdminLogout = () => {
-    sessionStorage.removeItem('hype_adm_token');
-    setAdmEditingProd(null);
-    setChallenge(null);
-    setAdmPass('');
-    setAdmMsg('');
-    setAdmVerifyBanner('');
-    setAdmMode('login');
-  };
-
-  // Forgot password flow
-  const handleSendRecovery = async (e: React.FormEvent) => {
-    e.preventDefault();
     setAdmBusy(true);
-    setAdmMsg('');
-    const code = generate6DigitCode();
-    const expiresAt = Date.now() + 10 * 60 * 1000;
-    const sentAtFormatted = new Date().toLocaleString('fr-FR');
-
-    const emailSent = await sendVerificationEmail(admEmail.trim(), code, sentAtFormatted);
-
-    setChallenge({
-      challengeId: 'chk_' + Date.now(),
-      email: admEmail.trim(),
-      code,
-      expiresAt,
-      message: `Un code de vérification à 6 chiffres a été envoyé à ${admEmail.trim()} pour réinitialiser votre mot de passe et vous connecter.`,
-      emailJsSent: emailSent,
-      sentAtFormatted,
-    });
-    setWantUpdatePassAfterCode(true);
-    setAdmMode('verify-code');
+    const { error } = await supabase.auth.verifyOtp({ email: ADMIN_EMAIL, token: verificationCodeInput.trim(), type: 'email' });
+    if (error) setAdmMsg('Code invalide ou expiré. Utilisez le dernier e-mail reçu.');
+    else {
+      if (wantUpdatePassAfterCode && newPassAfterCode.length >= 8) {
+        const { error: updateError } = await supabase.auth.updateUser({ password: newPassAfterCode });
+        if (updateError) setAdmMsg(updateError.message);
+      }
+      await openAdminSession();
+      setChallenge(null);
+    }
     setAdmBusy(false);
   };
-
-  // Update password in security tab
-  const handleUpdatePasswordInSecurity = (e: React.FormEvent) => {
+  const handleAdminLogout = async () => {
+    await supabase.auth.signOut();
+    setIsAdmin(false);
+    setOrders([]);
+    setAdmEditingProd(null);
+    setChallenge(null);
+    setAdmMode('login');
+  };
+  const handleSendRecovery = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newPasswordSetting1.length < 8) {
-      setAdmMsg('Le mot de passe doit comporter au moins 8 caractères.');
+    setWantUpdatePassAfterCode(true);
+    await sendEmailAccess();
+  };
+  const handleUpdatePasswordInSecurity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPasswordSetting1.length < 8 || newPasswordSetting1 !== newPasswordSetting2) {
+      setAdmMsg('Les mots de passe doivent être identiques et comporter au moins 8 caractères.');
       return;
     }
-    if (newPasswordSetting1 !== newPasswordSetting2) {
-      setAdmMsg('Les deux mots de passe ne correspondent pas.');
-      return;
-    }
-    setAdminPassword(newPasswordSetting1);
-    setNewPasswordSetting1('');
-    setNewPasswordSetting2('');
-    setAdmMsg('Nouveau mot de passe enregistré avec succès.');
-    setSecurityLogs((prev) => [
-      {
-        id: Date.now(),
-        timestamp: new Date().toISOString(),
-        email: ADMIN_EMAIL,
-        event: 'password_reset',
-        details: 'Mot de passe administrateur modifié avec succès.',
-        status: 'success',
-      },
-      ...prev,
-    ]);
+    const { error } = await supabase.auth.updateUser({ password: newPasswordSetting1 });
+    setAdmMsg(error ? error.message : 'Nouveau mot de passe enregistré.');
+    if (!error) { setNewPasswordSetting1(''); setNewPasswordSetting2(''); }
   };
 
   // Storefront interactions
@@ -1008,11 +843,11 @@ export function App() {
 
   const cartSubtotal = cart.reduce((acc, x) => {
     const info = lookupCartItem(x);
-    return acc + (info ? info.p.p * x.q : 0);
+    return acc + (info ? variantPrice(info.p.p, info.c) * x.q : 0);
   }, 0);
 
   const getPaymentSummary = () => {
-    const t = cartSubtotal + LIV;
+    const t = cartSubtotal + shippingFee;
     if (!coPayMode) return null;
     return {
       v: coPayMode,
@@ -1022,17 +857,18 @@ export function App() {
   };
 
   const handleSendOrder = async () => {
-    const w = coWa.replace(/\D/g, '');
+    const w = normalizeWhatsapp(coWa);
     const a = getPaymentSummary();
     const errs: string[] = [];
 
     if (coName.trim().length < 3) errs.push('Écris ton nom complet.');
-    if (!/^03[23478]\d{7}$/.test(w)) {
+    if (!w) {
       errs.push('Numéro WhatsApp invalide : 10 chiffres (032, 033, 034, 037 ou 038).');
     }
     if (!coWaConfirm) errs.push('Confirme que ce numéro est joignable sur WhatsApp.');
     if (coAddr.trim().length < 8) errs.push('Décris ton adresse de livraison à Antananarivo.');
     if (!a) errs.push('Choisis ton mode de paiement Mvola.');
+    if (!coZone) errs.push('Choisis ta zone de livraison.');
     if (coMvolaRef.trim().length < 6) errs.push('Saisis la référence de transaction Mvola.');
     if (!coTerms) errs.push("Accepte les conditions de vente pour continuer.");
     if (!cart.length) errs.push('Ton panier est vide.');
@@ -1045,95 +881,22 @@ export function App() {
     setCoErrors([]);
     setCoSubmitting(true);
 
-    const nextId = orders.length ? Math.max(...orders.map((o) => o.id)) + 1 : 101;
-    const no = `HP-${2400 + nextId - 100}`;
-
-    const lines: OrderItem[] = [];
-    for (const item of cart) {
-      const p = catalog.find((prod) => prod.id === item.id);
-      if (p && p.cols[item.c]) {
-        lines.push({
-          id: p.id,
-          name: p.n,
-          color: p.cols[item.c].n,
-          colorHex: p.cols[item.c].h,
-          size: item.s,
-          price: p.p,
-          q: item.q,
-        });
-      }
-    }
-
-    // Deduct stock in rawProducts
-    setRawProducts((prev) => {
-      const updated = JSON.parse(JSON.stringify(prev)) as RawProduct[];
-      for (const item of cart) {
-        const prod = updated.find((p) => p.id === item.id);
-        if (prod && prod.colors[item.c]) {
-          const col = prod.colors[item.c];
-          if (typeof col.st === 'object' && col.st !== null && item.s) {
-            col.st[item.s] = Math.max(0, Number(col.st[item.s] || 0) - item.q);
-          } else {
-            col.st = Math.max(0, Number(col.st || 0) - item.q);
-          }
-        }
-      }
-      return updated;
+    if (!w || !a || !coZone) { setCoSubmitting(false); return; }
+    const { data, error } = await supabase.rpc('place_order', {
+      _name: coName.trim(), _whatsapp: w, _address: coAddr.trim() + ', Antananarivo',
+      _notes: coNotes.trim(), _zone: coZone, _pay_mode: a.v, _mvola_ref: coMvolaRef.trim(),
+      _items: cart.map(item => ({ id: item.id, c: item.c, s: item.s, q: item.q })),
     });
-
-    const newOrder: Order = {
-      id: nextId,
-      no,
-      created_at: new Date().toISOString(),
-      name: coName.trim(),
-      whatsapp: w,
-      address: coAddr.trim() + ', Antananarivo',
-      notes: coNotes.trim(),
-      items: lines,
-      pay_mode: a!.v as '50' | '100',
-      paid: a!.paid,
-      balance: a!.t - a!.paid,
-      total: a!.t,
-      mvola_ref: coMvolaRef.trim(),
-      status: 'En attente de paiement',
-    };
-
-    setOrders((prev) => [newOrder, ...prev]);
-
-    const pr = lines.map(
-      (l) => `${l.q} × ${l.name} – ${l.color}${l.size ? ' – ' + l.size : ''} – ${formatAr(l.price * l.q)}`
-    );
-    const whatsappMsg = `Bonjour HYPE ! Commande ${no} – ${coName.trim()} – total ${formatAr(newOrder.total)} – payé ${formatAr(newOrder.paid)} – réf. Mvola ${newOrder.mvola_ref} – frais de livraison ${formatAr(LIV)} à payer au livreur`;
-
-    try {
-      if (window.emailjs) {
-        await window.emailjs.send(
-          EJ.s,
-          EJ.t,
-          {
-            nom_client: coName.trim(),
-            telephone: w,
-            adresse_livraison: newOrder.address,
-            produits: pr.join('<br>'),
-            mode_paiement:
-              a!.v === '50'
-                ? 'ACOMPTE 50 % PAYÉ – SOLDE À LA LIVRAISON'
-                : 'PAIEMENT TOTAL PAR MVOLA',
-            reference_mvola: newOrder.mvola_ref,
-            total: formatAr(newOrder.total),
-            montant_paye: formatAr(newOrder.paid),
-            solde_livraison: formatAr(newOrder.balance),
-            lien_whatsapp: `https://wa.me/261${w.slice(1)}?text=${encodeURIComponent(
-              "Bonjour, c'est HYPE ! Nous avons bien reçu ta commande n°" + no
-            )}`,
-          },
-          { publicKey: EJ.k }
-        );
-      }
-    } catch (e) {
-      console.warn('EmailJS order notify error:', e);
+    if (error || !data) {
+      setCoErrors([error?.message || 'Commande non enregistrée. Réessayez.']);
+      setCoSubmitting(false);
+      await fetchProducts();
+      return;
     }
-
+    const newOrder = data as unknown as Order;
+    const no = newOrder.no;
+    const whatsappMsg = orderMessage(newOrder);
+    await fetchProducts();
     setLastOrder({
       no,
       url: `https://wa.me/${WA}?text=${encodeURIComponent(whatsappMsg)}`,
@@ -1144,10 +907,10 @@ export function App() {
     setCoSubmitting(false);
   };
 
-  const handleStatusChange = (orderId: number, newStatus: string) => {
-    setOrders((prev) =>
-      prev.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o))
-    );
+  const handleStatusChange = async (orderId: number, newStatus: string) => {
+    const { error } = await supabase.from('orders').update({ status: newStatus }).eq('id', orderId);
+    if (error) { alert(error.message); return; }
+    await fetchOrders();
   };
 
   const exportCsv = () => {
@@ -1183,39 +946,8 @@ export function App() {
   // "en livraison" -> BLEU
   // "livré" -> BLANC
   const getOrderStatusConfig = (status: string) => {
-    switch (status) {
-      case 'En attente de paiement':
-        return {
-          cardClass: 'bg-red-500/15 border-2 border-red-600 text-red-950 dark:text-red-100',
-          badgeClass: 'bg-red-600 text-white font-bold',
-          tagLabel: 'EN ATTENTE DE PAIEMENT (ROUGE)',
-        };
-      case 'Paiement vérifié':
-        return {
-          cardClass: 'bg-emerald-500/15 border-2 border-emerald-600 text-emerald-950 dark:text-emerald-100',
-          badgeClass: 'bg-emerald-600 text-white font-bold',
-          tagLabel: 'PAIEMENT VÉRIFIÉ (VERT)',
-        };
-      case 'En livraison':
-        return {
-          cardClass: 'bg-blue-500/15 border-2 border-blue-600 text-blue-950 dark:text-blue-100',
-          badgeClass: 'bg-blue-600 text-white font-bold',
-          tagLabel: 'EN LIVRAISON (BLEU)',
-        };
-      case 'Livrée':
-        return {
-          cardClass: 'bg-white dark:bg-neutral-900 border-2 border-neutral-300 dark:border-neutral-700 text-neutral-900 dark:text-white shadow-sm',
-          badgeClass: 'bg-neutral-200 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 border border-neutral-400 font-bold',
-          tagLabel: 'LIVRÉE (BLANC)',
-        };
-      case 'Annulée':
-      default:
-        return {
-          cardClass: 'bg-neutral-200/50 dark:bg-neutral-800/40 border border-neutral-400/50 opacity-70',
-          badgeClass: 'bg-neutral-500 text-white font-bold',
-          tagLabel: 'ANNULÉE',
-        };
-    }
+    const key = status === 'En attente de paiement' ? 'pending' : status === 'Paiement vérifié' ? 'verified' : status === 'En livraison' ? 'shipping' : status === 'Livrée' ? 'delivered' : 'cancelled';
+    return { cardClass: `order-card order-${key}`, badgeClass: `order-badge order-badge-${key}`, tagLabel: status.toUpperCase() };
   };
 
   // Photo upload from gallery for color with professional studio processing (no deformation & auto bg removal)
@@ -1245,7 +977,7 @@ export function App() {
     }
   };
 
-  const handleSaveProduct = () => {
+  const handleSaveProduct = async () => {
     if (!admEditingProd) return;
     const name = (admEditingProd.name || '').trim();
     const category = (admEditingProd.category || '').trim();
@@ -1268,9 +1000,11 @@ export function App() {
       return;
     }
 
+    if (colors.some(c => c.p !== undefined && (!Number.isFinite(c.p) || c.p <= 0))) { setAdmProdError('Le prix spécifique doit être supérieur à zéro.'); return; }
     const badgeValue = (admEditingProd.badge || customBadgeInput || '').trim();
 
-    setRawProducts((prev) => {
+    try {
+    await setRawProducts((prev) => {
       const copy = [...prev];
       if (admEditingProd.id) {
         const idx = copy.findIndex((p) => p.id === admEditingProd.id);
@@ -1309,11 +1043,12 @@ export function App() {
     setAdmEditingProd(null);
     setAdmProdError('');
     setCustomBadgeInput('');
+    } catch (error) { setAdmProdError(error instanceof Error ? error.message : 'Enregistrement impossible.'); }
   };
 
-  const handleDeleteProduct = (id: number) => {
+  const handleDeleteProduct = async (id: number) => {
     if (window.confirm('Confirmer la suppression de cet article ?')) {
-      setRawProducts((prev) => prev.filter((p) => p.id !== id));
+      try { await setRawProducts((prev) => prev.filter((p) => p.id !== id)); } catch (error) { alert(error.message); }
     }
   };
 
@@ -1618,7 +1353,7 @@ export function App() {
                         {p.op && p.op > p.p ? (
                           <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
                             <span className="text-xs sm:text-sm font-black text-[var(--red)] tabular-nums">
-                              {formatAr(p.p)}
+                              {formatAr(Math.min(...p.cols.map(col => variantPrice(p.p, col))))}
                             </span>
                             <span className="text-[10px] sm:text-xs text-[var(--mut)] line-through tabular-nums opacity-75">
                               {formatAr(p.op)}
@@ -1629,7 +1364,7 @@ export function App() {
                           </div>
                         ) : (
                           <div className="text-xs sm:text-sm font-bold text-[var(--red)] tabular-nums mt-0.5">
-                            {formatAr(p.p)}
+                            {formatAr(Math.min(...p.cols.map(col => variantPrice(p.p, col))))}
                           </div>
                         )}
                       </div>
@@ -1918,21 +1653,21 @@ export function App() {
                   </h2>
                   
                   {/* Prix normal vs Prix Promotionnel */}
-                  {curProd.op && curProd.op > curProd.p ? (
+                  {curProd.op && curProd.op > variantPrice(curProd.p, c) ? (
                     <div className="flex items-center gap-2 flex-wrap mt-1">
                       <span className="text-lg sm:text-xl font-black text-red-600 tabular-nums">
-                        {formatAr(curProd.p)}
+                        {formatAr(variantPrice(curProd.p, c))}
                       </span>
                       <span className="text-xs sm:text-sm text-[var(--mut)] line-through tabular-nums opacity-75">
                         {formatAr(curProd.op)}
                       </span>
                       <span className="text-[10px] font-bold bg-red-600 text-white px-1.5 py-0.5 rounded-md">
-                        -{Math.round(((curProd.op - curProd.p) / curProd.op) * 100)}% EN PROMO
+                        -{Math.round(((curProd.op - variantPrice(curProd.p, c)) / curProd.op) * 100)}% EN PROMO
                       </span>
                     </div>
                   ) : (
                     <div className="text-base sm:text-lg font-bold text-[var(--red)] tabular-nums mt-1">
-                      {formatAr(curProd.p)}
+                      {formatAr(variantPrice(curProd.p, c))}
                     </div>
                   )}
                   <p className="text-xs sm:text-sm text-[var(--mut)] mt-1.5 leading-relaxed">
@@ -2020,6 +1755,9 @@ export function App() {
                   </svg>
                   <span>Ajouter au panier</span>
                 </button>
+                <Button asChild variant="link" className="w-full h-auto py-3 whitespace-normal text-[var(--red)]">
+                  <a href={`https://wa.me/${WA}?text=${encodeURIComponent('Bonjour HYPE ! Je souhaite poser une question sur ' + curProd.n + ' (' + c.n + ').')}`} target="_blank" rel="noopener noreferrer">Poser une question sur WhatsApp</a>
+                </Button>
               </div>
             </div>
           </div>
@@ -2052,6 +1790,18 @@ export function App() {
                 </button>
               </div>
 
+              {drawerView !== 'ok' && cart.length > 0 && (
+                <fieldset className="mt-4 border-0 space-y-2">
+                  <legend className="font-semibold text-sm mb-2">Zone de livraison *</legend>
+                  {([['ville', 'Antananarivo ville', 3000], ['peripherie', 'Périphérie / Environs', 4000]] as const).map(([zone, label, fee]) => (
+                    <label key={zone} className={`flex items-center gap-2 p-3 border rounded-md text-xs cursor-pointer ${coZone === zone ? 'border-[var(--red)] bg-[var(--card)]' : 'border-[var(--ln)]'}`}>
+                      <input type="radio" name="delivery-zone" value={zone} checked={coZone === zone} onChange={() => setCoZone(zone)} className="accent-[var(--red)]" />
+                      <span className="flex-1">{label}</span><b>{formatAr(fee)}</b>
+                    </label>
+                  ))}
+                  {coZone && <p className="text-xs text-[var(--mut)]">Frais de livraison : {formatAr(shippingFee)} à payer au livreur le jour J de la livraison.</p>}
+                </fieldset>
+              )}
               {/* Cart View */}
               {drawerView === 'cart' && (
                 <div className="mt-4">
@@ -2104,7 +1854,7 @@ export function App() {
                             </div>
                             <div className="text-right shrink-0">
                               <div className="text-xs sm:text-sm font-bold text-[var(--red)] tabular-nums">
-                                {formatAr(p.p * x.q)}
+                                {formatAr(variantPrice(p.p, c) * x.q)}
                               </div>
                               <button
                                 onClick={() => updateCartQty(i, -99)}
@@ -2126,13 +1876,13 @@ export function App() {
                           </span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-[var(--mut)]">Livraison (Antananarivo)</span>
-                          <span className="font-semibold tabular-nums">{formatAr(LIV)}</span>
+                          <span className="text-[var(--mut)]">Livraison (au livreur)</span>
+                          <span className="font-semibold tabular-nums">{coZone ? formatAr(shippingFee) : 'À sélectionner'}</span>
                         </div>
                         <div className="flex justify-between pt-2 border-t-2 border-[var(--fg)] text-base font-bold">
                           <span>Total</span>
                           <span className="text-[var(--red)] tabular-nums">
-                            {formatAr(cartSubtotal + LIV)}
+                            {formatAr(cartSubtotal + shippingFee)}
                           </span>
                         </div>
                       </div>
@@ -2227,7 +1977,7 @@ export function App() {
                       Envoie <b>{formatAr(getPaymentSummary()?.paid || 0)}</b> par Mvola au{' '}
                       <b>038 12 219 50</b> (Ramamonjy Marielle), puis saisis la référence.
                       <div className="mt-1.5 opacity-90">
-                        Les frais de livraison s&apos;élèvent à <b>{formatAr(LIV)}</b>, à payer au livreur le jour de la livraison.
+                        Les frais de livraison s&apos;élèvent à <b>{formatAr(shippingFee)}</b>, à payer au livreur le jour de la livraison.
                         {coPayMode === '50' && (
                           <> Solde articles à régler à la livraison : <b>{formatAr(cartSubtotal - Math.round(cartSubtotal / 2))}</b>.</>
                         )}
@@ -2300,15 +2050,17 @@ export function App() {
                   >
                     Ouvrir WhatsApp
                   </a>
+                  <Button variant="outline" className="w-full" onClick={() => { setDrawerOpen(false); setDrawerView('cart'); }}>Continuer mes achats</Button>
                 </div>
               )}
             </div>
 
             {/* Bottom Button in Drawer */}
             <div className="pt-4 border-t border-[var(--ln)] mt-4">
+              {drawerView === 'cart' && coErrors.length > 0 && <p role="alert" className="text-[var(--red)] text-xs mb-2">{coErrors.join(' ')}</p>}
               {drawerView === 'cart' && cart.length > 0 && (
                 <button
-                  onClick={() => setDrawerView('co')}
+                  onClick={() => { if (!coZone) { setCoErrors(['Choisis ta zone de livraison.']); return; } setDrawerView('co'); }}
                   className="w-full h-11 sm:h-12 text-xs sm:text-sm font-bold uppercase tracking-wider text-white bg-[var(--red)] hover:opacity-90 active:scale-[0.99]"
                 >
                   Passer la commande
@@ -2361,7 +2113,7 @@ export function App() {
               </a>
             </div>
 
-            {admMode !== 'dashboard' ? (
+            {!isAdmin || admMode !== 'dashboard' ? (
               <div className="max-w-md mx-auto bg-[var(--card)] border border-[var(--ln)] p-4 sm:p-6 rounded-md shadow-md">
                 {/* LOGIN FORM */}
                 {admMode === 'login' && (
@@ -2407,6 +2159,9 @@ export function App() {
                       {admBusy ? 'Vérification...' : 'Se connecter'}
                     </button>
 
+                    <Button type="button" variant="outline" disabled={admBusy} onClick={handleCreateAdminAccount} className="w-full whitespace-normal h-auto min-h-10">
+                      Premier accès : créer mon compte admin
+                    </Button>
                     <div className="pt-2 flex justify-between text-xs text-[var(--mut)]">
                       <button
                         type="button"
@@ -2421,7 +2176,7 @@ export function App() {
                     </div>
 
                     <div className="p-2.5 bg-neutral-100 dark:bg-neutral-800/60 rounded-md text-[11px] text-[var(--mut)] leading-relaxed mt-2 border border-[var(--ln)]">
-                      <b>Sécurité e-mail active :</b> en cas de mot de passe erroné, un e-mail avec un code de vérification à 6 chiffres est immédiatement envoyé à {ADMIN_EMAIL} pour valider la tentative.
+                      <b>Accès protégé :</b> seuls votre mot de passe ou le lien/code reçu sur votre e-mail administrateur permettent de vous connecter.
                     </div>
                   </form>
                 )}
@@ -2436,25 +2191,23 @@ export function App() {
 
                     <div className="flex items-center justify-between text-xs text-[var(--mut)]">
                       <span>Destinataire : <b>{challenge.email}</b></span>
-                      <span className="font-mono font-bold text-[var(--red)]">
-                        {secondsRemaining > 0 ? formatCountdown(secondsRemaining) : 'Expiré'}
-                      </span>
+
                     </div>
 
                     <div>
                       <label className="block font-semibold mb-1">
-                        Code de vérification e-mail (6 chiffres)
+                        Code de vérification e-mail
                       </label>
                       <input
                         type="text"
                         inputMode="numeric"
-                        maxLength={6}
+                        maxLength={8}
                         autoFocus
                         required
                         placeholder="000000"
                         value={verificationCodeInput}
                         onChange={(e) =>
-                          setVerificationCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6))
+                          setVerificationCodeInput(e.target.value.replace(/\D/g, '').slice(0, 8))
                         }
                         className="w-full h-12 text-center font-mono text-2xl tracking-[0.25em] font-bold border-2 border-[var(--red)] bg-[var(--bg)] rounded-md focus:outline-none"
                       />
@@ -2489,7 +2242,7 @@ export function App() {
 
                     <button
                       type="submit"
-                      disabled={admBusy || secondsRemaining === 0}
+                      disabled={admBusy}
                       className="w-full h-11 text-xs sm:text-sm font-bold uppercase tracking-wider text-white bg-[var(--red)] hover:opacity-90 active:scale-98 disabled:opacity-50"
                     >
                       Valider et ouvrir la session
@@ -2526,7 +2279,7 @@ export function App() {
                       Code de réinitialisation
                     </h3>
                     <p className="text-xs text-[var(--mut)]">
-                      Saisis ton e-mail pour recevoir un code à 6 chiffres.
+                      Recevez un e-mail de connexion sécurisé sur votre adresse administrateur.
                     </p>
                     <input
                       type="email"
@@ -2648,7 +2401,7 @@ export function App() {
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 pt-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                       <button
                         onClick={exportCsv}
                         className="px-3 py-1 text-xs font-bold uppercase border border-[var(--fg)] rounded-md hover:bg-black/5"
@@ -2757,8 +2510,8 @@ export function App() {
                               </div>
 
                               {/* Status Select & WhatsApp Action */}
-                              <div className="flex items-center justify-between gap-2 pt-1">
-                                <div className="flex items-center gap-1.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                                <div className="flex flex-wrap items-center gap-1.5">
                                   <span className="text-[11px] font-semibold">Changer le statut :</span>
                                   <select
                                     value={o.status}
@@ -3267,6 +3020,13 @@ export function App() {
                                 </div>
                               </div>
 
+                              <div>
+                                <label htmlFor={`price-${colIdx}`} className="block text-[11px] font-semibold mb-1">Prix spécifique par couleur / modèle (Ar)</label>
+                                <input id={`price-${colIdx}`} type="number" min="1" step="1" placeholder={`Prix de base : ${admEditingProd.price || 0} Ar`} value={col.p ?? ''} onChange={e => {
+                                  const colors = (admEditingProd.colors || []).map((color, index) => index === colIdx ? { ...color, p: e.target.value === '' ? undefined : Number(e.target.value) } : color);
+                                  setAdmEditingProd({ ...admEditingProd, colors });
+                                }} className="w-full h-9 px-3 border border-[var(--ln)] bg-[var(--card)] rounded-md" />
+                              </div>
                               {/* PHOTO UPLOADER FROM GALLERY WITH PROFESSIONAL STUDIO PROCESSING */}
                               <div className="p-3 bg-[var(--card)] border border-[var(--ln)] rounded-md space-y-2.5">
                                 <div className="flex items-center justify-between flex-wrap gap-1">
@@ -3278,6 +3038,14 @@ export function App() {
                                   </span>
                                 </div>
 
+                                <fieldset className="flex flex-wrap gap-3 text-xs">
+                                  <legend className="font-semibold mb-2">Cadrage photo</legend>
+                                  {([['cover', 'Plein format 1:1 net'], ['blur', 'Flou d’arrière-plan esthétique']] as const).map(([mode, label]) => (
+                                    <label key={mode} className="flex gap-2 items-center cursor-pointer">
+                                      <input type="radio" name={`framing-${colIdx}`} checked={studioMode === mode} onChange={() => { setStudioMode(mode); setStudioRemoveBg(false); }} className="accent-[var(--red)]" />{label}
+                                    </label>
+                                  ))}
+                                </fieldset>
                                 {/* Studio Photo Controls : Fond Blanc, Fond Noir, Détourage automatique */}
                                 <div className="p-2.5 bg-[var(--bg)] border border-[var(--ln)] rounded-md space-y-2">
                                   <div className="flex items-center justify-between text-[11px] font-semibold">
@@ -3339,16 +3107,16 @@ export function App() {
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        setStudioMode('original');
+                                        setStudioMode('cover');
                                         setStudioRemoveBg(false);
                                       }}
                                       className={`p-1.5 rounded-md border font-bold text-center transition-all ${
-                                        !studioRemoveBg
+                                        studioMode === 'cover'
                                           ? 'border-red-600 bg-black/5 text-[var(--fg)] shadow-xs ring-1 ring-red-600'
                                           : 'border-[var(--ln)] opacity-70 hover:opacity-100'
                                       }`}
                                     >
-                                      📷 Original centré
+                                      📷 Plein format
                                     </button>
                                   </div>
                                 </div>
