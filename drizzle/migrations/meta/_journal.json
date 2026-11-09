@@ -8,6 +8,20 @@
       "when": 1794079511324,
       "tag": "0000_hype_shop",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1794246293326,
+      "tag": "0001_realtime_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794246318537,
+      "tag": "0002_storage_and_preorder",
+      "breakpoints": true
     }
   ]
 }

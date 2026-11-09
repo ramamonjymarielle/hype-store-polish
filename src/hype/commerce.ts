@@ -1,9 +1,15 @@
 export const SHOP_WHATSAPP = '261381221950';
+export const MVOLA_NUMBER_DISPLAY = '034 16 686 61';
+export const MVOLA_NAME = 'Tiavina Murielle';
 export type DeliveryZone = 'ville' | 'peripherie';
 export const formatAr = (value: number) => Math.round(value).toLocaleString('fr-FR').replace(/\u202f/g, ' ') + ' Ar';
 export function normalizeWhatsapp(value: string): string | null {
-  let digits = value.replace(/[\s().-]/g, '').replace(/^\+/, '');
-  if (digits.startsWith('261')) digits = '0' + digits.slice(3);
+  // Accepte 038…, 38…, +261…, 261…, 00261…, +261 (0)38… avec espaces, points, tirets ou parenthèses.
+  let digits = value.replace(/\D/g, '');
+  if (digits.startsWith('00261')) digits = digits.slice(2);
+  if (digits.startsWith('2610')) digits = digits.slice(4);
+  else if (digits.startsWith('261')) digits = digits.slice(3);
+  if (digits.length === 9) digits = '0' + digits;
   return /^03[23478]\d{7}$/.test(digits) ? digits : null;
 }
 export function deliveryFee(zone: DeliveryZone | '') {
@@ -27,7 +33,7 @@ export function orderMessage(order: {
     `Bonjour HYPE ! Commande ${order.no}`,
     `Client : ${order.name}`, `Téléphone WhatsApp : ${order.whatsapp}`, `Adresse : ${order.address}`,
     ...(order.notes ? [`Note : ${order.notes}`] : []), '', 'Articles :',
-    ...order.items.map(item => `${item.q} × ${item.name} — ${item.color} — Taille : ${item.size || 'Unique'} — ${formatAr(item.price)} / unité — ${formatAr(item.q * item.price)}`),
+    ...order.items.map(item => `${item.q} × ${item.name} — ${item.color} — ${sizeLabel(item.size)} : ${item.size || 'Unique'} — ${formatAr(item.price)} / unité — ${formatAr(item.q * item.price)}`),
     '', `Sous-total articles : ${formatAr(order.subtotal)}`,
     `Zone : ${order.zone === 'peripherie' ? 'Périphérie / Environs' : 'Antananarivo ville'}`,
     `Frais de livraison : ${formatAr(order.delivery_fee)} à payer au livreur le jour J de la livraison`,
@@ -37,4 +43,21 @@ export function orderMessage(order: {
     `Solde restant à payer au livreur (articles + livraison) : ${formatAr(order.balance)}`,
     'Commande à confirmer après vérification de la transaction Mvola.',
   ].join('\n');
+}
+/** Seuls les articles marqués « DISPONIBLE DE SUITE » ont un stock géré. Tous les autres sont sur commande (stock illimité). */
+export function tracksStock(badge?: string | null): boolean {
+  return (badge || '').trim().toUpperCase() === 'DISPONIBLE DE SUITE';
+}
+
+/** Pointures chaussures (35 à 42). */
+export const SHOE_SIZES = ['35', '36', '37', '38', '39', '40', '41', '42'];
+
+/** Vrai si la liste ne contient que des pointures numériques (ex : 38, 39, 40). */
+export function isShoeSizes(sizes?: (string | null | undefined)[] | null): boolean {
+  const list = (sizes || []).filter((x): x is string => Boolean(x));
+  return list.length > 0 && list.every((x) => /^\d{2}$/.test(x));
+}
+
+export function sizeLabel(size?: string | null): string {
+  return isShoeSizes([size]) ? 'Pointure' : 'Taille';
 }

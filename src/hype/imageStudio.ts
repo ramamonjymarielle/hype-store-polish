@@ -58,7 +58,7 @@ export async function processStudioImage(
             } else {
               ctx.drawImage(img, (targetSize - width) / 2, (targetSize - height) / 2, width, height);
             }
-            resolve(canvas.toDataURL('image/jpeg', 0.92));
+            resolve(canvas.toDataURL('image/jpeg', 0.8));
             return;
           }
 
@@ -85,7 +85,7 @@ export async function processStudioImage(
           // Si on ne retire pas le fond, dessiner l'image directement centrée
           if (!options.removeBg && options.mode === 'original') {
             ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
-            resolve(canvas.toDataURL('image/jpeg', 0.92));
+            resolve(canvas.toDataURL('image/jpeg', 0.8));
             return;
           }
 
@@ -96,7 +96,7 @@ export async function processStudioImage(
           const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
           if (!tempCtx) {
             ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
-            resolve(canvas.toDataURL('image/jpeg', 0.92));
+            resolve(canvas.toDataURL('image/jpeg', 0.8));
             return;
           }
 
@@ -166,7 +166,7 @@ export async function processStudioImage(
           if (options.mode === 'transparent') {
             resolve(canvas.toDataURL('image/png'));
           } else {
-            resolve(canvas.toDataURL('image/jpeg', 0.92));
+            resolve(canvas.toDataURL('image/jpeg', 0.8));
           }
         } catch (err) {
           console.warn('Fallback studio image:', err);

@@ -1,0 +1,69 @@
+{
+  "source": "https://github.com/ramamonjymarielle/hype.git",
+  "revision": "53922dc2da46ca86073792c97a520e132290ebf3",
+  "capabilities": [
+    {
+      "capability": "code",
+      "source": "src/hype in GitHub default branch",
+      "outcome": "import active storefront, preserve design and behavior, update Mvola recipient only",
+      "status": "verified",
+      "next_action": null
+    },
+    {
+      "capability": "schema",
+      "source": "repository migrations",
+      "outcome": "reuse connected Cloud tables; apply realtime and preorder migration",
+      "status": "applied",
+      "next_action": null
+    },
+    {
+      "capability": "records",
+      "source": "existing connected Cloud",
+      "outcome": "preserve existing products and orders",
+      "status": "preserved",
+      "next_action": null
+    },
+    {
+      "capability": "auth identities and authorization",
+      "source": "existing Cloud Auth and user_roles",
+      "outcome": "preserve existing admin sign-in and roles",
+      "status": "preserved_unverified",
+      "next_action": "requires owner account for authenticated verification"
+    },
+    {
+      "capability": "uploaded files",
+      "source": "public/images and imageStorage helper",
+      "outcome": "retain bundled product photos and provision product-images bucket",
+      "status": "blocked_public_bucket",
+      "next_action": "Owner must enable public buckets in workspace Privacy & Security; original source falls back to embedded images."
+    },
+    {
+      "capability": "external email",
+      "source": "EmailJS service_hype",
+      "outcome": "preserve existing notification service and configuration",
+      "status": "preserved_unverified",
+      "next_action": "requires real order to verify email delivery"
+    },
+    {
+      "capability": "payments and contact",
+      "source": "manual Mvola and WhatsApp",
+      "outcome": "Mvola 034 16 686 61 Tiavina Murielle, WhatsApp unchanged",
+      "status": "verified_checkout_display",
+      "next_action": null
+    },
+    {
+      "capability": "public endpoints, webhooks, callbacks and schedules",
+      "source": "source inspection",
+      "outcome": "none detected beyond Cloud auth redirects",
+      "status": "not_detected",
+      "next_action": null
+    },
+    {
+      "capability": "secrets and cutover",
+      "source": "existing project configuration",
+      "outcome": "retain managed configuration; do not import credentials or repository metadata",
+      "status": "preserved",
+      "next_action": "publish after verification"
+    }
+  ]
+}

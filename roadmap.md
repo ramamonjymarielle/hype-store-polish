@@ -1,10 +1,8 @@
 # Roadmap
-- [ ] Lovable Cloud: shared products + orders, admin login via Cloud
-- [ ] Delivery choice Tana 3 000 / Périphérie 4 000
-- [ ] WhatsApp number accepts 03x / +261 / 261
-- [ ] Admin order cards readable
-- [ ] Photo framing: Cover 1:1 + Blur fill
-- [ ] Per-color price
-- [ ] Enriched WhatsApp message
-- [ ] Product page WhatsApp question link + "Continuer mes achats"
-- [ ] Enforce 50% deposit on articles only; delivery paid to courier, UI and server tests
+- [x] Import active GitHub storefront revision 53922dc; preserve behavior and design
+- [x] Set Mvola to 034 16 686 61, Tiavina Murielle; preserve WhatsApp 0381221950
+- [x] Apply source realtime and preorder database rules to existing Cloud
+- [x] Verify payment display on desktop/mobile and run commerce tests
+- [ ] Public product-image bucket — blocked by workspace privacy policy; source fallback preserved
+
+Previous improvement tasks are superseded by the user-supplied GitHub version, which must remain unchanged. Admin sign-in, uploads and actual order/email delivery remain unverified without owner setup.

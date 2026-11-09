@@ -5,7 +5,8 @@ import { processStudioImage, type StudioOptions } from './imageStudio';
 import { ConditionsDeVente } from './ConditionsDeVente';
 import { supabase } from '@/integrations/supabase/client';
 import { Button } from '@/components/ui/button';
-import { normalizeWhatsapp, deliveryFee, variantPrice, orderMessage, type DeliveryZone } from './commerce';
+import { MVOLA_NUMBER_DISPLAY, MVOLA_NAME, normalizeWhatsapp, deliveryFee, variantPrice, orderMessage, tracksStock, isShoeSizes, sizeLabel, SHOE_SIZES, type DeliveryZone } from './commerce';
+import { hostProductImage } from './imageStorage';
 
 declare global {
   interface Window {
@@ -124,6 +125,8 @@ const ST = [
 ];
 
 const PRESET_SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL'];
+const PRESET_SHOE_SIZES = SHOE_SIZES; // Pointures 35 à 42
+const UNLIMITED_QTY = 99; // Article sur commande : pas de stock, quantité plafonnée à 99
 const PRESET_BADGES = [
   { label: 'Aucune étiquette', val: '' },
   { label: 'DROP (Série limitée)', val: 'DROP' },
@@ -411,6 +414,49 @@ const compressImageFile = (file: File): Promise<string> =>
     };
     reader.readAsDataURL(file);
   });
+
+// Envoie à la boutique un e-mail récapitulatif de chaque nouvelle commande (via EmailJS).
+// Ne bloque jamais la commande : en cas d'échec, la commande reste enregistrée et visible dans l'admin.
+const sendOrderEmail = async (order: any): Promise<void> => {
+  try {
+    const ej = typeof window !== 'undefined' ? window.emailjs : undefined;
+    if (!ej) return;
+    const items: OrderItem[] = order.items || [];
+    const itemsList = items
+      .map((i) => `${i.q} × ${i.name} — ${i.color}${i.size ? ` — ${sizeLabel(i.size)} ${i.size}` : ''} — ${formatAr(i.price * i.q)}`)
+      .join('\n');
+    const zoneLabel = order.zone === 'peripherie' ? 'Périphérie / Environs' : 'Antananarivo ville';
+    await ej.send(
+      EJ.s,
+      EJ.t,
+      {
+        to_email: ADMIN_EMAIL,
+        reply_to: ADMIN_EMAIL,
+        subject: `Nouvelle commande HYPE ${order.no} — ${order.name} — ${formatAr(order.total)}`,
+        message: orderMessage(order),
+        order_no: order.no,
+        customer_name: order.name,
+        customer_phone: order.whatsapp,
+        customer_address: order.address,
+        customer_notes: order.notes || '',
+        items_list: itemsList,
+        zone: zoneLabel,
+        subtotal: formatAr(order.subtotal),
+        delivery_fee: formatAr(order.delivery_fee),
+        total: formatAr(order.total),
+        paid: formatAr(order.paid),
+        balance_items: formatAr(order.subtotal - order.paid),
+        balance_delivery: formatAr(order.delivery_fee),
+        balance_total: formatAr(order.balance),
+        pay_mode: order.pay_mode === '50' ? 'Acompte 50 % sur les articles' : 'Paiement intégral des articles',
+        mvola_ref: order.mvola_ref,
+      },
+      { publicKey: EJ.k }
+    );
+  } catch (error) {
+    console.warn('E-mail de commande non envoyé :', error);
+  }
+};
 
 export function App() {
   // Products and persistence
@@ -796,7 +842,7 @@ export function App() {
   const addToCart = () => {
     if (!curProd) return;
     const c = curProd.cols[ci];
-    const mx = curProd.sz ? stk(c, sz) : stk(c);
+    const mx = tracksStock(curProd.badge) ? (curProd.sz ? stk(c, sz) : stk(c)) : UNLIMITED_QTY;
     setCart((prev) => {
       const next = [...prev];
       const existing = next.find(
@@ -820,7 +866,7 @@ export function App() {
     if (!p) return null;
     const c = p.cols[x.c];
     if (!c) return null;
-    return { p, c, mx: x.s ? stk(c, x.s) : stk(c) };
+    return { p, c, mx: tracksStock(p.badge) ? (x.s ? stk(c, x.s) : stk(c)) : UNLIMITED_QTY };
   };
 
   const updateCartQty = (idx: number, delta: number) => {
@@ -863,7 +909,7 @@ export function App() {
 
     if (coName.trim().length < 3) errs.push('Écris ton nom complet.');
     if (!w) {
-      errs.push('Numéro WhatsApp invalide : 10 chiffres (032, 033, 034, 037 ou 038).');
+      errs.push('Numéro WhatsApp invalide : exemples acceptés 038 12 219 50, +261 38 12 219 50 ou 261 38 12 219 50.');
     }
     if (!coWaConfirm) errs.push('Confirme que ce numéro est joignable sur WhatsApp.');
     if (coAddr.trim().length < 8) errs.push('Décris ton adresse de livraison à Antananarivo.');
@@ -896,6 +942,7 @@ export function App() {
     const newOrder = data as unknown as Order;
     const no = newOrder.no;
     const whatsappMsg = orderMessage(newOrder);
+    void sendOrderEmail(newOrder);
     await fetchProducts();
     setLastOrder({
       no,
@@ -915,15 +962,18 @@ export function App() {
 
   const exportCsv = () => {
     const rows = [
-      ['N°', 'Date', 'Nom', 'WhatsApp', 'Adresse', 'Produits', 'Mode', 'Payé', 'Solde', 'Total', 'Réf Mvola', 'Statut'],
+      ['N°', 'Date', 'Nom', 'WhatsApp', 'Adresse', 'Zone', 'Produits', 'Mode', 'Sous-total articles', 'Frais livraison', 'Payé', 'Solde livreur', 'Total', 'Réf Mvola', 'Statut'],
       ...orders.map((o) => [
         o.no,
         o.created_at,
         o.name,
         o.whatsapp,
         o.address,
-        o.items.map((i) => `${i.q}x ${i.name} ${i.color} ${i.size || ''}`).join(' | '),
+        o.zone === 'peripherie' ? 'Périphérie / Environs' : 'Antananarivo ville',
+        o.items.map((i) => `${i.q}x ${i.name} ${i.color} ${i.size || ''} (${i.price} Ar)`).join(' | '),
         o.pay_mode,
+        o.subtotal,
+        o.delivery_fee,
         o.paid,
         o.balance,
         o.total,
@@ -956,13 +1006,16 @@ export function App() {
     try {
       setStudioProcessing(true);
       const readUrls: string[] = [];
+      let cloudFallback = false;
       for (const file of Array.from(files)) {
         const processed = await processStudioImage(file, {
           mode: studioMode,
           removeBg: studioRemoveBg,
-          targetSize: 1000,
+          targetSize: 800,
         });
-        readUrls.push(processed);
+        const hosted = await hostProductImage(processed);
+        if (!hosted.hosted) cloudFallback = true;
+        readUrls.push(hosted.url);
       }
       const updatedColors = [...(admEditingProd.colors || [])];
       updatedColors[colorIdx] = {
@@ -970,6 +1023,7 @@ export function App() {
         i: [...(updatedColors[colorIdx].i || []), ...readUrls],
       };
       setAdmEditingProd({ ...admEditingProd, colors: updatedColors });
+      if (cloudFallback) setAdmProdError('Photo ajoutée, mais non envoyée au stockage cloud (exécute la migration 0002 dans Supabase). Elle restera lourde.');
     } catch (e: any) {
       setAdmProdError(e?.message || 'Erreur lors du traitement photo studio.');
     } finally {
@@ -1004,6 +1058,10 @@ export function App() {
     const badgeValue = (admEditingProd.badge || customBadgeInput || '').trim();
 
     try {
+    // Les anciennes photos encore stockées en base64 sont envoyées vers le stockage cloud à l'enregistrement.
+    const hostedColors: ProductColor[] = await Promise.all(
+      colors.map(async (c) => ({ ...c, i: await Promise.all((c.i || []).map(async (u) => (await hostProductImage(u)).url)) }))
+    );
     await setRawProducts((prev) => {
       const copy = [...prev];
       if (admEditingProd.id) {
@@ -1019,7 +1077,7 @@ export function App() {
             badge: badgeValue,
             visible: admEditingProd.visible !== false,
             sizes: admEditingProd.sizes || [],
-            colors,
+            colors: hostedColors,
           };
         }
       } else {
@@ -1034,7 +1092,7 @@ export function App() {
           badge: badgeValue,
           visible: admEditingProd.visible !== false,
           sizes: admEditingProd.sizes || [],
-          colors,
+          colors: hostedColors,
         });
       }
       return copy;
@@ -1286,7 +1344,7 @@ export function App() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 sm:gap-4">
             {filteredProducts.length ? (
               filteredProducts.map((p) => {
-                const out = p.cols.length > 0 && p.cols.every((c) => tot(c, p) === 0);
+                const out = tracksStock(p.badge) && p.cols.length > 0 && p.cols.every((c) => tot(c, p) === 0);
                 const isFavorite = fav.includes(p.id);
                 const badgeStyle = getBadgeStyle(p.badge);
 
@@ -1515,10 +1573,12 @@ export function App() {
       {/* 7. PRODUCT DETAIL BOTTOM SHEET / MODAL (#m) */}
       {curProd && (() => {
         const c = curProd.cols[ci] || curProd.cols[0] || { n: 'Standard', h: '#0A0A0A', i: [], st: 0 };
-        const n = curProd.sz ? (sz ? stk(c, sz) : null) : stk(c);
+        const n = !tracksStock(curProd.badge) ? null : curProd.sz ? (sz ? stk(c, sz) : null) : stk(c);
         const info =
           curProd.sz && !sz
-            ? 'Choisis une taille.'
+            ? (isShoeSizes(curProd.sz) ? 'Choisis ta pointure.' : 'Choisis une taille.')
+            : !tracksStock(curProd.badge)
+            ? 'Article sur commande.'
             : n !== null && n <= 0
             ? 'Épuisé.'
             : n !== null && n <= 3
@@ -1691,7 +1751,7 @@ export function App() {
                           onClick={() => {
                             setCi(idx);
                             setIm(0);
-                            if (sz && !stk(col, sz)) setSz(null);
+                            if (sz && tracksStock(curProd.badge) && !stk(col, sz)) setSz(null);
                           }}
                           className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full border border-black/20 relative active:scale-95 transition-all ${
                             idx === ci ? 'ring-2 ring-[var(--red)] ring-offset-2' : ''
@@ -1707,11 +1767,11 @@ export function App() {
                   {curProd.sz && (
                     <div className="mt-3">
                       <span className="text-xs font-semibold uppercase tracking-wider block mb-1">
-                        Taille disponible
+                        {isShoeSizes(curProd.sz) ? 'Pointure disponible' : 'Taille disponible'}
                       </span>
                       <div className="flex gap-1.5 flex-wrap">
                         {curProd.sz.map((sizeOption) => {
-                          const available = stk(c, sizeOption) > 0;
+                          const available = !tracksStock(curProd.badge) || stk(c, sizeOption) > 0;
                           const selected = sz === sizeOption;
                           return (
                             <button
@@ -1755,8 +1815,11 @@ export function App() {
                   </svg>
                   <span>Ajouter au panier</span>
                 </button>
-                <Button asChild variant="link" className="w-full h-auto py-3 whitespace-normal text-[var(--red)]">
-                  <a href={`https://wa.me/${WA}?text=${encodeURIComponent('Bonjour HYPE ! Je souhaite poser une question sur ' + curProd.n + ' (' + c.n + ').')}`} target="_blank" rel="noopener noreferrer">Poser une question sur WhatsApp</a>
+                <Button asChild variant="outline" className="w-full h-11 mt-2 border-[var(--fg)] text-[var(--fg)] bg-transparent hover:bg-[var(--card)] text-xs font-bold uppercase tracking-wider">
+                  <a href={`https://wa.me/${WA}?text=${encodeURIComponent('Bonjour HYPE ! Je souhaite poser une question sur ' + curProd.n + ' (' + c.n + ') avant d’acheter.')}`} target="_blank" rel="noopener noreferrer">
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 20.5l1.7-5.5A8.4 8.4 0 1 1 21 11.5z" /></svg>
+                    <span>Poser une question sur WhatsApp</span>
+                  </a>
                 </Button>
               </div>
             </div>
@@ -1832,7 +1895,7 @@ export function App() {
                                   className="inline-block w-2.5 h-2.5 rounded-full border border-black/30"
                                   style={{ backgroundColor: c.h }}
                                 />
-                                {x.s && <span>– Taille {x.s}</span>}
+                                {x.s && <span>– {sizeLabel(x.s)} {x.s}</span>}
                               </div>
                               <div className="flex items-center gap-2 mt-1">
                                 <button
@@ -1975,7 +2038,7 @@ export function App() {
                   {coPayMode && (
                     <div className="p-3 bg-[var(--fg)] text-[var(--bg)] text-xs rounded-md">
                       Envoie <b>{formatAr(getPaymentSummary()?.paid || 0)}</b> par Mvola au{' '}
-                      <b>038 12 219 50</b> (Ramamonjy Marielle), puis saisis la référence.
+                      <b>{MVOLA_NUMBER_DISPLAY}</b> ({MVOLA_NAME}), puis saisis la référence.
                       <div className="mt-1.5 opacity-90">
                         Les frais de livraison s&apos;élèvent à <b>{formatAr(shippingFee)}</b>, à payer au livreur le jour de la livraison.
                         {coPayMode === '50' && (
@@ -2485,7 +2548,7 @@ export function App() {
                                       </span>
                                       {item.size && (
                                         <span className="bg-white/70 dark:bg-black/40 px-1.5 py-0.5 rounded-md border border-black/10 text-[11px] font-bold">
-                                          Taille : {item.size}
+                                          {sizeLabel(item.size)} : {item.size}
                                         </span>
                                       )}
                                     </div>
@@ -2610,7 +2673,7 @@ export function App() {
                                     {formatAr(p.price)}
                                   </span>
                                   <span>•</span>
-                                  <span>Stock: {totalStock}</span>
+                                  <span>{tracksStock(p.badge) ? `Stock: ${totalStock}` : 'Sur commande'}</span>
                                 </div>
                                 {/* Colors circles list */}
                                 <div className="flex items-center gap-1 mt-1">
@@ -2624,7 +2687,7 @@ export function App() {
                                   ))}
                                   {p.sizes && p.sizes.length > 0 && (
                                     <span className="text-[10px] text-[var(--mut)] ml-1">
-                                      Tailles: {p.sizes.join(', ')}
+                                      {isShoeSizes(p.sizes) ? 'Pointures' : 'Tailles'}: {p.sizes.join(', ')}
                                     </span>
                                   )}
                                 </div>
@@ -2847,69 +2910,86 @@ export function App() {
                         </p>
                       </div>
 
-                      {/* SECTION TAILLES (XS, S, M, L, XL, XXL) */}
-                      <div className="p-3 bg-[var(--bg)] border border-[var(--ln)] rounded-md space-y-2">
-                        <div className="flex items-center justify-between">
-                          <label className="font-semibold text-xs">
-                            📏 Tailles disponibles pour ce modèle :
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const hasSizes = (admEditingProd.sizes || []).length > 0;
-                              setAdmEditingProd({
-                                ...admEditingProd,
-                                sizes: hasSizes ? [] : ['S', 'M', 'L', 'XL'],
-                              });
-                            }}
-                            className="text-[11px] text-[var(--red)] underline font-bold"
-                          >
-                            {(admEditingProd.sizes || []).length > 0
-                              ? 'Passer en Taille Unique (Sacs, Casquettes...)'
-                              : 'Activer les tailles de vêtements'}
-                          </button>
-                        </div>
-
-                        {(admEditingProd.sizes || []).length > 0 ? (
-                          <div>
-                            <div className="flex flex-wrap gap-2 pt-1">
-                              {PRESET_SIZES.map((szPreset) => {
-                                const active = (admEditingProd.sizes || []).includes(szPreset);
-                                return (
-                                  <button
-                                    key={szPreset}
-                                    type="button"
-                                    onClick={() => {
-                                      const current = admEditingProd.sizes || [];
-                                      const nextSizes = active
-                                        ? current.filter((s) => s !== szPreset)
-                                        : [...current, szPreset];
-                                      setAdmEditingProd({
-                                        ...admEditingProd,
-                                        sizes: nextSizes,
-                                      });
-                                    }}
-                                    className={`px-3 py-1.5 text-xs font-bold rounded-md border transition-all ${
-                                      active
-                                        ? 'bg-[var(--fg)] text-[var(--bg)] border-[var(--fg)] shadow-xs'
-                                        : 'bg-[var(--card)] text-[var(--mut)] border-[var(--ln)] opacity-50'
-                                    }`}
-                                  >
-                                    {szPreset} {active ? '✓' : ''}
-                                  </button>
-                                );
-                              })}
+                      {/* SECTION TAILLES / POINTURES */}
+                      {(() => {
+                        const curSizes = admEditingProd.sizes || [];
+                        const shoeMode = isShoeSizes(curSizes);
+                        const clothesMode = curSizes.length > 0 && !shoeMode;
+                        const presets = shoeMode ? PRESET_SHOE_SIZES : PRESET_SIZES;
+                        const modeBtn = (active: boolean) =>
+                          `px-3 py-1.5 text-[11px] font-bold rounded-md border transition-all ${
+                            active
+                              ? 'bg-[var(--fg)] text-[var(--bg)] border-[var(--fg)]'
+                              : 'bg-[var(--card)] text-[var(--mut)] border-[var(--ln)]'
+                          }`;
+                        return (
+                          <div className="p-3 bg-[var(--bg)] border border-[var(--ln)] rounded-md space-y-2">
+                            <label className="font-semibold text-xs block">
+                              📏 {shoeMode ? 'Pointures proposées pour ce modèle :' : 'Tailles disponibles pour ce modèle :'}
+                            </label>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                className={modeBtn(clothesMode)}
+                                onClick={() => setAdmEditingProd({ ...admEditingProd, sizes: ['S', 'M', 'L', 'XL'] })}
+                              >
+                                Vêtements (XS à XXL)
+                              </button>
+                              <button
+                                type="button"
+                                className={modeBtn(shoeMode)}
+                                onClick={() => setAdmEditingProd({ ...admEditingProd, sizes: [...PRESET_SHOE_SIZES] })}
+                              >
+                                Chaussures (35 à 42)
+                              </button>
+                              <button
+                                type="button"
+                                className={modeBtn(curSizes.length === 0)}
+                                onClick={() => setAdmEditingProd({ ...admEditingProd, sizes: [] })}
+                              >
+                                Taille unique
+                              </button>
                             </div>
-                            <p className="text-[11px] text-[var(--mut)] mt-1.5">
-                              Cliquez sur les tailles que vous proposez. Le stock pourra être ajusté pour chaque taille ci-dessous.
-                            </p>
+
+                            {curSizes.length > 0 ? (
+                              <div>
+                                <div className="flex flex-wrap gap-2 pt-1">
+                                  {presets.map((szPreset) => {
+                                    const active = curSizes.includes(szPreset);
+                                    return (
+                                      <button
+                                        key={szPreset}
+                                        type="button"
+                                        onClick={() => {
+                                          const current = admEditingProd.sizes || [];
+                                          const nextSizes = active
+                                            ? current.filter((x) => x !== szPreset)
+                                            : presets.filter((x) => current.includes(x) || x === szPreset);
+                                          setAdmEditingProd({ ...admEditingProd, sizes: nextSizes });
+                                        }}
+                                        className={`px-3 py-1.5 text-xs font-bold rounded-md border transition-all ${
+                                          active
+                                            ? 'bg-[var(--fg)] text-[var(--bg)] border-[var(--fg)] shadow-xs'
+                                            : 'bg-[var(--card)] text-[var(--mut)] border-[var(--ln)] opacity-50'
+                                        }`}
+                                      >
+                                        {szPreset} {active ? '✓' : ''}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                <p className="text-[11px] text-[var(--mut)] mt-1.5">
+                                  Clique sur les {shoeMode ? 'pointures' : 'tailles'} que tu proposes. Le stock par {shoeMode ? 'pointure' : 'taille'} n&apos;apparaît que pour les articles « DISPONIBLE DE SUITE ».
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="text-[11px] text-[var(--mut)] bg-[var(--card)] p-2 rounded-md">
+                                ✓ Taille unique (idéal pour accessoires, sacs, casquettes).
+                              </div>
+                            )}
                           </div>
-                        ) : (
-                          <div className="text-[11px] text-[var(--mut)] bg-[var(--card)] p-2 rounded-md">
-                            ✓ Taille unique (idéal pour accessoires, sacs, casquettes).
-                          </div>
-                        )}
-                      </div>
+                        );
+                      })()}
 
                       {/* SECTION COULEURS AVEC CERCLES PASTILLES, PHOTOS DE GALERIE & STOCKS */}
                       <div className="space-y-3 pt-2">
@@ -3188,8 +3268,13 @@ export function App() {
                                 )}
                               </div>
 
-                              {/* STOCK FOR THIS COLOR */}
-                              <div className="pt-1">
+                              {/* STOCK FOR THIS COLOR (uniquement pour « DISPONIBLE DE SUITE ») */}
+                              {!tracksStock(admEditingProd.badge || customBadgeInput) && (
+                                <p className="text-[11px] text-[var(--mut)] bg-[var(--card)] border border-[var(--ln)] rounded-md p-2">
+                                  🛒 Article sur commande : aucun stock à gérer. Choisis l&apos;étiquette « DISPONIBLE DE SUITE » pour suivre un stock.
+                                </p>
+                              )}
+                              <div className={`pt-1 ${tracksStock(admEditingProd.badge || customBadgeInput) ? '' : 'hidden'}`}>
                                 <span className="block text-[11px] font-semibold mb-1">
                                   Stock disponible pour la couleur {col.n} :
                                 </span>
