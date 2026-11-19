@@ -7,6 +7,8 @@ import { supabase } from '@/integrations/supabase/client';
 import { Button } from '@/components/ui/button';
 import { MVOLA_NUMBER_DISPLAY, MVOLA_NAME, normalizeWhatsapp, deliveryFee, variantPrice, orderMessage, tracksStock, isShoeSizes, sizeLabel, SHOE_SIZES, type DeliveryZone } from './commerce';
 import { hostProductImage } from './imageStorage';
+import { persistCatalogProduct } from './catalogPersistence';
+import { signInAdminWithPassword } from './adminAuth';
 
 declare global {
   interface Window {
@@ -461,38 +463,26 @@ const sendOrderEmail = async (order: any): Promise<void> => {
 export function App() {
   // Products and persistence
   const [rawProducts, setRawProductsState] = useState<RawProduct[]>(() =>
-    loadLocal('hype_products_cache_v4', INITIAL_PRODUCTS)
+    INITIAL_PRODUCTS
   );
   const [orders, setOrders] = useState<Order[]>([]);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
+  const [catalogError, setCatalogError] = useState('');
+  const [catalogReady, setCatalogReady] = useState(false);
+  const savingCatalog = useRef(false);
   const fetchProducts = async () => {
     const { data, error } = await supabase.from('products').select('data, sort').order('sort');
-    if (!error && data) {
-      const list = data.map((r: any) => r.data as RawProduct);
-      setRawProductsState(list);
-      saveLocal('hype_products_cache_v4', list);
+    if (error || !data) {
+      setCatalogError('Catalogue indisponible. Vérifiez votre connexion puis réessayez.');
+      throw new Error('Impossible de charger le catalogue enregistré.');
     }
-  };
-
-  // Persist before displaying success; side effects never run inside a React state updater.
-  const setRawProducts = async (updater: (prev: RawProduct[]) => RawProduct[]) => {
-    if (!isAdmin) throw new Error('Connexion administrateur requise.');
-    const next = updater(structuredClone(rawProducts));
-    const removed = rawProducts.filter(p => !next.some(n => n.id === p.id)).map(p => p.id);
-    const changed = next.map((p, sort) => ({ p, sort })).filter(({ p }) => {
-      const old = rawProducts.find(o => o.id === p.id);
-      return !old || JSON.stringify(old) !== JSON.stringify(p);
-    });
-    if (removed.length) {
-      const { error } = await supabase.from('products').delete().in('id', removed);
-      if (error) throw error;
-    }
-    if (changed.length) {
-      const { error } = await supabase.from('products').upsert(changed.map(({ p, sort }) => ({ id: p.id, data: p, sort, updated_at: new Date().toISOString() })));
-      if (error) throw error;
-    }
-    await fetchProducts();
+    const list = data.map((r: any) => r.data as RawProduct);
+    setRawProductsState(list);
+    saveLocal('hype_products_cache_v4', list);
+    setCatalogError('');
+    setCatalogReady(true);
+    return list;
   };
 
   const fetchOrders = async () => {
@@ -501,7 +491,7 @@ export function App() {
   };
 
   useEffect(() => {
-    fetchProducts();
+    fetchProducts().catch(() => {});
     const checkAdmin = async (session: any) => {
       if (!session?.user) {
         setIsAdmin(false);
@@ -522,7 +512,7 @@ export function App() {
     });
     const channel = supabase
       .channel('hype-products-' + Math.random().toString(36).slice(2))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchProducts())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => { if (!savingCatalog.current) fetchProducts().catch(() => {}); })
       .subscribe();
     return () => {
       sub.subscription.unsubscribe();
@@ -545,7 +535,7 @@ export function App() {
         timestamp: new Date().toISOString(),
         email: ADMIN_EMAIL,
         event: 'password_login',
-        details: 'Protection par code e-mail de sécurité activée pour le compte admin.',
+        details: 'Accès administrateur protégé par mot de passe.',
         status: 'success',
       },
     ])
@@ -649,25 +639,19 @@ export function App() {
   // Admin (#admin) route & authentication state
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => window.location.hash === '#admin');
   const [admMode, setAdmMode] = useState<
-    'login' | 'verify-code' | 'forgot' | 'dashboard'
+    'login' | 'dashboard'
   >('login');
   const [admEmail, setAdmEmail] = useState<string>('ramamonjymarielle@gmail.com');
   const [admPass, setAdmPass] = useState<string>('');
   const [admMsg, setAdmMsg] = useState<string>('');
   const [admBusy, setAdmBusy] = useState<boolean>(false);
 
-  // Wrong-password email verification challenge state
-  const [challenge, setChallenge] = useState<VerificationChallengeState | null>(null);
-  const [verificationCodeInput, setVerificationCodeInput] = useState<string>('');
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(600);
-  const [wantUpdatePassAfterCode, setWantUpdatePassAfterCode] = useState<boolean>(false);
-  const [newPassAfterCode, setNewPassAfterCode] = useState<string>('');
-
   // Admin dashboard state
   const [admTab, setAdmTab] = useState<'o' | 'p' | 's'>('o');
   const [admShowCancelled, setAdmShowCancelled] = useState<boolean>(false);
   const [admEditingProd, setAdmEditingProd] = useState<Partial<RawProduct> | null>(null);
   const [admProdError, setAdmProdError] = useState<string>('');
+  const [productSaving, setProductSaving] = useState(false);
   const [admVerifyBanner, setAdmVerifyBanner] = useState<string>('');
   const [customBadgeInput, setCustomBadgeInput] = useState<string>('');
 
@@ -675,10 +659,6 @@ export function App() {
   const [studioMode, setStudioMode] = useState<StudioOptions['mode']>('cover');
   const [studioRemoveBg, setStudioRemoveBg] = useState<boolean>(false);
   const [studioProcessing, setStudioProcessing] = useState<boolean>(false);
-
-  // Password reset fields in security tab
-  const [newPasswordSetting1, setNewPasswordSetting1] = useState<string>('');
-  const [newPasswordSetting2, setNewPasswordSetting2] = useState<string>('');
 
   // Listen to hash change for #admin
   useEffect(() => {
@@ -690,18 +670,6 @@ export function App() {
     window.addEventListener('hashchange', handleHash);
     return () => window.removeEventListener('hashchange', handleHash);
   }, []);
-
-  // Verification countdown timer
-  useEffect(() => {
-    if (admMode !== 'verify-code' || !challenge) return;
-    const tick = () => {
-      const left = Math.max(0, Math.floor((challenge.expiresAt - Date.now()) / 1000));
-      setSecondsRemaining(left);
-    };
-    tick();
-    const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
-  }, [admMode, challenge]);
 
   // Keyboard navigation for modal
   useEffect(() => {
@@ -732,85 +700,23 @@ export function App() {
     return true;
   };
 
-  const sendEmailAccess = async () => {
-    setAdmBusy(true);
-    setAdmMsg('');
-    const { error } = await supabase.auth.signInWithOtp({
-      email: ADMIN_EMAIL,
-      options: { shouldCreateUser: false, emailRedirectTo: window.location.origin + '/#admin' },
-    });
-    if (error) {
-      setAdmMsg('Envoi impossible : ' + error.message + '. Pour un premier accès, créez votre compte administrateur.');
-    } else {
-      setChallenge({ email: ADMIN_EMAIL, expiresAt: Date.now() + 3600000, message: 'Un e-mail de connexion sécurisé vient d’être envoyé. Utilisez le lien reçu ou le code contenu dans cet e-mail.', emailJsSent: true });
-      setAdmMode('verify-code');
-    }
-    setAdmBusy(false);
-  };
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAdmBusy(true);
     setAdmMsg('');
-    const { error } = await supabase.auth.signInWithPassword({ email: admEmail.trim(), password: admPass });
-    if (error) {
-      setAdmBusy(false);
-      if (admEmail.trim().toLowerCase() === ADMIN_EMAIL) await sendEmailAccess();
-      else setAdmMsg('Identifiants invalides.');
-      return;
-    }
-    await openAdminSession();
-    setAdmBusy(false);
-  };
-  const handleCreateAdminAccount = async () => {
-    if (admEmail.trim().toLowerCase() !== ADMIN_EMAIL || admPass.length < 8) {
-      setAdmMsg('Utilisez votre adresse administrateur et un nouveau mot de passe d’au moins 8 caractères.');
-      return;
-    }
-    setAdmBusy(true);
-    const { error } = await supabase.auth.signUp({ email: ADMIN_EMAIL, password: admPass, options: { emailRedirectTo: window.location.origin + '/#admin' } });
-    setAdmMsg(error ? error.message : 'Vérifiez votre boîte e-mail pour confirmer votre compte, puis connectez-vous.');
-    setAdmBusy(false);
-  };
-  const handleResendCode = sendEmailAccess;
-  const handleVerifyCodeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAdmBusy(true);
-    const { error } = await supabase.auth.verifyOtp({ email: ADMIN_EMAIL, token: verificationCodeInput.trim(), type: 'email' });
-    if (error) setAdmMsg('Code invalide ou expiré. Utilisez le dernier e-mail reçu.');
-    else {
-      if (wantUpdatePassAfterCode && newPassAfterCode.length >= 8) {
-        const { error: updateError } = await supabase.auth.updateUser({ password: newPassAfterCode });
-        if (updateError) setAdmMsg(updateError.message);
-      }
+    try {
+      await signInAdminWithPassword(ADMIN_EMAIL, admPass);
       await openAdminSession();
-      setChallenge(null);
-    }
-    setAdmBusy(false);
+    } catch { setAdmMsg('Mot de passe incorrect ou connexion indisponible.'); }
+    finally { setAdmBusy(false); }
   };
   const handleAdminLogout = async () => {
     await supabase.auth.signOut();
     setIsAdmin(false);
     setOrders([]);
     setAdmEditingProd(null);
-    setChallenge(null);
     setAdmMode('login');
   };
-  const handleSendRecovery = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setWantUpdatePassAfterCode(true);
-    await sendEmailAccess();
-  };
-  const handleUpdatePasswordInSecurity = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newPasswordSetting1.length < 8 || newPasswordSetting1 !== newPasswordSetting2) {
-      setAdmMsg('Les mots de passe doivent être identiques et comporter au moins 8 caractères.');
-      return;
-    }
-    const { error } = await supabase.auth.updateUser({ password: newPasswordSetting1 });
-    setAdmMsg(error ? error.message : 'Nouveau mot de passe enregistré.');
-    if (!error) { setNewPasswordSetting1(''); setNewPasswordSetting2(''); }
-  };
-
   // Storefront interactions
   const toggleFav = (id: number) => {
     setFav((prev) => {
@@ -1023,7 +929,7 @@ export function App() {
         i: [...(updatedColors[colorIdx].i || []), ...readUrls],
       };
       setAdmEditingProd({ ...admEditingProd, colors: updatedColors });
-      if (cloudFallback) setAdmProdError('Photo ajoutée, mais non envoyée au stockage cloud (exécute la migration 0002 dans Supabase). Elle restera lourde.');
+      if (cloudFallback) setAdmProdError('La photo sera conservée avec l’article lors de son enregistrement.');
     } catch (e: any) {
       setAdmProdError(e?.message || 'Erreur lors du traitement photo studio.');
     } finally {
@@ -1032,7 +938,7 @@ export function App() {
   };
 
   const handleSaveProduct = async () => {
-    if (!admEditingProd) return;
+    if (!admEditingProd || savingCatalog.current || studioProcessing) return;
     const name = (admEditingProd.name || '').trim();
     const category = (admEditingProd.category || '').trim();
     const price = Number(admEditingProd.price || 0);
@@ -1057,57 +963,38 @@ export function App() {
     if (colors.some(c => c.p !== undefined && (!Number.isFinite(c.p) || c.p <= 0))) { setAdmProdError('Le prix spécifique doit être supérieur à zéro.'); return; }
     const badgeValue = (admEditingProd.badge || customBadgeInput || '').trim();
 
-    try {
-    // Les anciennes photos encore stockées en base64 sont envoyées vers le stockage cloud à l'enregistrement.
-    const hostedColors: ProductColor[] = await Promise.all(
-      colors.map(async (c) => ({ ...c, i: await Promise.all((c.i || []).map(async (u) => (await hostProductImage(u)).url)) }))
-    );
-    await setRawProducts((prev) => {
-      const copy = [...prev];
-      if (admEditingProd.id) {
-        const idx = copy.findIndex((p) => p.id === admEditingProd.id);
-        if (idx !== -1) {
-          copy[idx] = {
-            id: admEditingProd.id,
-            name,
-            category,
-            price,
-            original_price,
-            descr: admEditingProd.descr || '',
-            badge: badgeValue,
-            visible: admEditingProd.visible !== false,
-            sizes: admEditingProd.sizes || [],
-            colors: hostedColors,
-          };
-        }
-      } else {
-        const nextId = copy.length ? Math.max(...copy.map((p) => p.id)) + 1 : 1;
-        copy.push({
-          id: nextId,
-          name,
-          category,
-          price,
-          original_price,
-          descr: admEditingProd.descr || '',
-          badge: badgeValue,
-          visible: admEditingProd.visible !== false,
-          sizes: admEditingProd.sizes || [],
-          colors: hostedColors,
-        });
-      }
-      return copy;
-    });
-
-    setAdmEditingProd(null);
+    savingCatalog.current = true;
+    setProductSaving(true);
     setAdmProdError('');
-    setCustomBadgeInput('');
-    } catch (error) { setAdmProdError(error instanceof Error ? error.message : 'Enregistrement impossible.'); }
+    try {
+      // Only save the edited product, never replace the catalog from a stale browser copy.
+      const current = await fetchProducts();
+      const existing = current.find(p => p.id === admEditingProd.id);
+      if (admEditingProd.id && !existing) throw new Error('Cet article a été supprimé. Actualisez le catalogue.');
+      const hostedColors: ProductColor[] = await Promise.all(
+        colors.map(async (c) => ({ ...c, i: await Promise.all((c.i || []).map(async (u) => (await hostProductImage(u)).url)) }))
+      );
+      const product: RawProduct = {
+        id: existing?.id ?? (Math.max(0, ...current.map(p => p.id)) + 1), name, category, price, original_price,
+        descr: admEditingProd.descr || '', badge: badgeValue,
+        visible: admEditingProd.visible !== false, sizes: admEditingProd.sizes || [], colors: hostedColors,
+      };
+      await persistCatalogProduct(product, existing ? current.findIndex(p => p.id === existing.id) : current.length);
+      await fetchProducts();
+      setAdmEditingProd(null);
+      setAdmProdError('');
+      setCustomBadgeInput('');
+    } catch (error) { setAdmProdError(error instanceof Error ? error.message : 'Enregistrement impossible. Gardez cette page ouverte et réessayez.'); }
+    finally { savingCatalog.current = false; setProductSaving(false); }
   };
 
   const handleDeleteProduct = async (id: number) => {
-    if (window.confirm('Confirmer la suppression de cet article ?')) {
-      try { await setRawProducts((prev) => prev.filter((p) => p.id !== id)); } catch (error) { alert(error.message); }
-    }
+    if (savingCatalog.current || !window.confirm('Confirmer la suppression de cet article ?')) return;
+    try {
+      const { error } = await supabase.from('products').delete().eq('id', id);
+      if (error) throw error;
+      await fetchProducts();
+    } catch { alert('Suppression impossible. Réessayez.'); }
   };
 
   // Filtered products for storefront based on rotation & category
@@ -2186,17 +2073,6 @@ export function App() {
                     </h3>
 
                     <div>
-                      <label className="block font-semibold mb-1">E-mail</label>
-                      <input
-                        type="email"
-                        required
-                        value={admEmail}
-                        onChange={(e) => setAdmEmail(e.target.value)}
-                        className="w-full h-10 px-3 text-base sm:text-sm border border-[var(--ln)] bg-[var(--bg)] rounded-md focus:outline-none focus:border-[var(--red)]"
-                      />
-                    </div>
-
-                    <div>
                       <label className="block font-semibold mb-1">Mot de passe</label>
                       <input
                         type="password"
@@ -2222,156 +2098,9 @@ export function App() {
                       {admBusy ? 'Vérification...' : 'Se connecter'}
                     </button>
 
-                    <Button type="button" variant="outline" disabled={admBusy} onClick={handleCreateAdminAccount} className="w-full whitespace-normal h-auto min-h-10">
-                      Premier accès : créer mon compte admin
-                    </Button>
-                    <div className="pt-2 flex justify-between text-xs text-[var(--mut)]">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAdmMsg('');
-                          setAdmMode('forgot');
-                        }}
-                        className="hover:underline"
-                      >
-                        Mot de passe oublié ?
-                      </button>
-                    </div>
-
-                    <div className="p-2.5 bg-neutral-100 dark:bg-neutral-800/60 rounded-md text-[11px] text-[var(--mut)] leading-relaxed mt-2 border border-[var(--ln)]">
-                      <b>Accès protégé :</b> seuls votre mot de passe ou le lien/code reçu sur votre e-mail administrateur permettent de vous connecter.
-                    </div>
                   </form>
                 )}
 
-                {/* WRONG PASSWORD -> 6-DIGIT EMAIL CODE CHALLENGE */}
-                {admMode === 'verify-code' && challenge && (
-                  <form onSubmit={handleVerifyCodeSubmit} className="space-y-3 text-xs sm:text-sm">
-                    <div className="p-2.5 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-700/60 rounded-md text-xs text-amber-900 dark:text-amber-200">
-                      <b className="block font-bold">Tentative protégée :</b>
-                      {challenge.message}
-                    </div>
-
-                    <div className="flex items-center justify-between text-xs text-[var(--mut)]">
-                      <span>Destinataire : <b>{challenge.email}</b></span>
-
-                    </div>
-
-                    <div>
-                      <label className="block font-semibold mb-1">
-                        Code de vérification e-mail
-                      </label>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={8}
-                        autoFocus
-                        required
-                        placeholder="000000"
-                        value={verificationCodeInput}
-                        onChange={(e) =>
-                          setVerificationCodeInput(e.target.value.replace(/\D/g, '').slice(0, 8))
-                        }
-                        className="w-full h-12 text-center font-mono text-2xl tracking-[0.25em] font-bold border-2 border-[var(--red)] bg-[var(--bg)] rounded-md focus:outline-none"
-                      />
-                    </div>
-
-
-                    <label className="flex items-center gap-2 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={wantUpdatePassAfterCode}
-                        onChange={(e) => setWantUpdatePassAfterCode(e.target.checked)}
-                        className="accent-[var(--red)]"
-                      />
-                      <span>Mettre à jour le mot de passe après cette validation</span>
-                    </label>
-
-                    {wantUpdatePassAfterCode && (
-                      <input
-                        type="password"
-                        placeholder="Nouveau mot de passe (min 8 car.)"
-                        value={newPassAfterCode}
-                        onChange={(e) => setNewPassAfterCode(e.target.value)}
-                        className="w-full h-10 px-3 text-base sm:text-sm border border-[var(--ln)] bg-[var(--bg)] rounded-md focus:outline-none"
-                      />
-                    )}
-
-                    {admMsg && (
-                      <div className="p-2 bg-red-100 dark:bg-red-950/40 text-[var(--red)] text-xs rounded-md">
-                        {admMsg}
-                      </div>
-                    )}
-
-                    <button
-                      type="submit"
-                      disabled={admBusy}
-                      className="w-full h-11 text-xs sm:text-sm font-bold uppercase tracking-wider text-white bg-[var(--red)] hover:opacity-90 active:scale-98 disabled:opacity-50"
-                    >
-                      Valider et ouvrir la session
-                    </button>
-
-                    <div className="flex justify-between pt-1 text-xs">
-                      <button
-                        type="button"
-                        onClick={handleResendCode}
-                        disabled={admBusy}
-                        className="text-[var(--mut)] hover:underline"
-                      >
-                        Renvoyer un code
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAdmMsg('');
-                          setChallenge(null);
-                          setAdmMode('login');
-                        }}
-                        className="text-[var(--mut)] hover:underline"
-                      >
-                        ← Annuler
-                      </button>
-                    </div>
-                  </form>
-                )}
-
-                {/* FORGOT PASSWORD */}
-                {admMode === 'forgot' && (
-                  <form onSubmit={handleSendRecovery} className="space-y-3 text-xs sm:text-sm">
-                    <h3 className="text-base sm:text-lg font-bold uppercase font-['Anton',sans-serif] tracking-wide border-l-3 border-[var(--red)] pl-2">
-                      Code de réinitialisation
-                    </h3>
-                    <p className="text-xs text-[var(--mut)]">
-                      Recevez un e-mail de connexion sécurisé sur votre adresse administrateur.
-                    </p>
-                    <input
-                      type="email"
-                      required
-                      value={admEmail}
-                      onChange={(e) => setAdmEmail(e.target.value)}
-                      className="w-full h-10 px-3 text-base sm:text-sm border border-[var(--ln)] bg-[var(--bg)] rounded-md focus:outline-none"
-                    />
-                    {admMsg && (
-                      <div className="p-2 bg-red-100 dark:bg-red-950/40 text-[var(--red)] text-xs rounded-md">
-                        {admMsg}
-                      </div>
-                    )}
-                    <button
-                      type="submit"
-                      disabled={admBusy}
-                      className="w-full h-11 text-xs sm:text-sm font-bold uppercase tracking-wider text-white bg-[var(--red)] hover:opacity-90"
-                    >
-                      Envoyer le code
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAdmMode('login')}
-                      className="text-xs text-[var(--mut)] hover:underline block mx-auto pt-1"
-                    >
-                      ← Retour à la connexion
-                    </button>
-                  </form>
-                )}
               </div>
             ) : (
               /* DASHBOARD VIEW */
@@ -2415,7 +2144,7 @@ export function App() {
                         : 'border-[var(--fg)]'
                     }`}
                   >
-                    Sécurité e-mail ({securityLogs.length})
+                    Sécurité ({securityLogs.length})
                   </button>
                   <a
                     href="/hype-site-complet.zip"
@@ -2440,6 +2169,7 @@ export function App() {
                   </div>
                 )}
 
+                {catalogError && <div role="alert" className="text-destructive text-sm">{catalogError}<Button variant="outline" onClick={() => fetchProducts().catch(() => {})}>Réessayer</Button></div>}
                 {/* 1. ORDERS TAB - COLOR-CODED AS REQUESTED BY USER */}
                 {admTab === 'o' && (
                   <div className="space-y-3">
@@ -3367,13 +3097,15 @@ export function App() {
                       <button
                         type="button"
                         onClick={handleSaveProduct}
+                        disabled={productSaving || studioProcessing || !catalogReady}
                         className="flex-1 h-11 bg-[var(--red)] text-white font-bold uppercase tracking-wider rounded-md hover:opacity-90 active:scale-99 shadow-sm"
                       >
-                        Enregistrer l’article
+                        {productSaving ? 'Enregistrement…' : 'Enregistrer l’article'}
                       </button>
                       <button
                         type="button"
                         onClick={() => setAdmEditingProd(null)}
+                        disabled={productSaving}
                         className="px-5 h-11 border border-[var(--fg)] font-bold uppercase rounded-md active:scale-95"
                       >
                         Annuler
@@ -3385,38 +3117,8 @@ export function App() {
                 {/* 3. SECURITY LOGS TAB */}
                 {admTab === 's' && (
                   <div className="space-y-3 text-xs">
-                    {/* Password change block */}
-                    <form
-                      onSubmit={handleUpdatePasswordInSecurity}
-                      className="p-3 bg-[var(--card)] border border-[var(--ln)] rounded-md space-y-2"
-                    >
-                      <h4 className="font-bold text-sm">Changer le mot de passe Admin</h4>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <input
-                          type="password"
-                          placeholder="Nouveau mot de passe"
-                          value={newPasswordSetting1}
-                          onChange={(e) => setNewPasswordSetting1(e.target.value)}
-                          className="h-9 px-2.5 border border-[var(--ln)] bg-[var(--bg)] rounded-md"
-                        />
-                        <input
-                          type="password"
-                          placeholder="Confirmer"
-                          value={newPasswordSetting2}
-                          onChange={(e) => setNewPasswordSetting2(e.target.value)}
-                          className="h-9 px-2.5 border border-[var(--ln)] bg-[var(--bg)] rounded-md"
-                        />
-                      </div>
-                      <button
-                        type="submit"
-                        className="h-9 px-4 bg-[var(--fg)] text-[var(--bg)] font-bold uppercase rounded-md"
-                      >
-                        Sauvegarder
-                      </button>
-                    </form>
-
                     <h4 className="font-bold text-sm pt-2">
-                      Journal des tentatives de connexion & codes e-mail
+                      Journal de sécurité
                     </h4>
 
                     <div className="space-y-2">

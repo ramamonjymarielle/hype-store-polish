@@ -12,4 +12,6 @@
 - The HYPE storefront lives in src/hype/ (imported single-file app, client-only via lazy+ClientOnly at /) because it relies on window/localStorage at init.
 - Products and orders are authoritative in Cloud; place orders atomically with server-priced variants and stock checks to prevent price tampering and overselling.
 - Admin access uses Cloud Auth and a protected user_roles row; browser state never authorizes catalog or order mutations.
+- Admin password sign-in is isolated in a tested browser-safe helper; never add OTP fallback or embed credentials in the client.
 - Shared commerce helpers define presentation totals and phone normalization; database rules independently validate checkout input.
+- Catalog edits write only the targeted product and require a matching fresh Cloud read before closing the editor; never use browser cache as catalog authority or overwrite unrelated rows.
